@@ -144,7 +144,9 @@ def test_checkpoint_resumes_identical_training(tmp_path, mode):
     batches = DataLoader(data, batch_size=2)
     train_epoch(model, batches, optimizer, args, 0, 2)
     path = tmp_path / "checkpoint.pt"
+    args.retired_inference_option = True
     save_checkpoint(path, model, optimizer, 0, 12.0, args, "split")
+    del args.retired_inference_option
     train_epoch(model, batches, optimizer, args, 1, 2)
     expected = copy.deepcopy(model.state_dict())
     other = build_model(args)

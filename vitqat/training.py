@@ -122,7 +122,8 @@ def read_checkpoint(path, model, args, split_hash, optimizer=None):
     # 비교해야, 옛 checkpoint를 --mixup 등을 켠 채로 이어 학습해 실험이 섞이는 일을 막을 수 있다.
     saved_config = {**AUGMENT_DEFAULTS, **checkpoint["config"]}
     for key, value in saved_config.items():
-        if key not in ignored and getattr(args, key) != value:
+        # Retired CLI options in older checkpoints do not affect supported settings.
+        if key in vars(args) and key not in ignored and getattr(args, key) != value:
             raise ValueError(f"Checkpoint config mismatch: {key}: {value!r} != {getattr(args, key)!r}")
     if checkpoint["split_hash"] != split_hash:
         raise ValueError("Checkpoint data split does not match")
