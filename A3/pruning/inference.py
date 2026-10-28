@@ -42,13 +42,16 @@ class AttentionRouter(nn.Module):
         self.pruning_rate = pruning_rate
 
     def forward(self, x, attention):
-        if attention.ndim != 4 or attention.shape[0] != x.shape[0] or attention.shape[-2:] != (x.shape[1], x.shape[1]):
-            raise ValueError("Attention must have shape [B, heads, tokens, tokens]")
-        if x.shape[1] <= self.pruning_rate + 1:
-            raise ValueError("Router must retain CLS and at least one patch")
+        # Fixed-shape export runs after eager validation; do not trace Python guards.
+        if not torch.onnx.is_in_onnx_export():
+            if attention.ndim != 4 or attention.shape[0] != x.shape[0] or attention.shape[-2:] != (x.shape[1], x.shape[1]):
+                raise ValueError("Attention must have shape [B, heads, tokens, tokens]")
+            if x.shape[1] <= self.pruning_rate + 1:
+                raise ValueError("Router must retain CLS and at least one patch")
         scores = attention.detach()[:, :, 0, :].mean(dim=1).clone()
         scores[:, 0] = torch.inf
-        order = torch.argsort(scores, dim=1, descending=True, stable=False)
+        # The default is stable=False; omitting it supports legacy ONNX export.
+        order = torch.argsort(scores, dim=1, descending=True)
         reordered = x.gather(1, order.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
         keep = x.shape[1] - self.pruning_rate
         return reordered[:, :keep], reordered[:, keep:]

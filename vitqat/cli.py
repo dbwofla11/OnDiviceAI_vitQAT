@@ -10,7 +10,7 @@ def parser():
     p = argparse.ArgumentParser(description="Food-101 scratch ViT training")
     p.add_argument("--experiment", help="Optional label stored with results")
     p.add_argument("--model", default="vit_tiny_patch16_224", help="timm VisionTransformer architecture")
-    p.add_argument("--mode", choices=["fp32", "qat"], required=True)
+    p.add_argument("--mode", choices=["fp32", "qat"], help="Required for training; restored from --eval-checkpoint for evaluation")
     p.add_argument("--weight-bits", type=int, choices=[2, 3, 4, 8], default=2)
     p.add_argument("--activation-bits", type=int, choices=[2, 3, 4, 8], default=2)
     p.add_argument("--use-cropr", action=argparse.BooleanOptionalAction, default=False)

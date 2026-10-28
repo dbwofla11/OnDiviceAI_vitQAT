@@ -1,4 +1,6 @@
 # OnDiviceAI_vitQAT
+
+W2 가중치·A8 attention의 TensorRT INT8 export, 정확도·실험 지표 및 벤치마크: [docs/tensorrt-int8.md](docs/tensorrt-int8.md).
 온디바이스 AI - vit , QAT , ptq
 
 ```powershell

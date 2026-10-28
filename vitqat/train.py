@@ -25,6 +25,10 @@ def measure_model(model, args):
 
 
 def main(args):
+    if args.eval_checkpoint:
+        return run(args, build_model=build_model, measure_model=measure_model, train_epoch_fn=train_epoch)
+    if args.mode is None:
+        raise ValueError("--mode is required for training")
     if args.aux_loss_weight < 0:
         raise ValueError("aux_loss_weight must be nonnegative")
     if args.use_cropr and args.aux_loss_weight == 0:

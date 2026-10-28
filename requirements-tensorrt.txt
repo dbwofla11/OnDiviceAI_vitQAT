@@ -1,0 +1,4 @@
+# CUDA 12 TensorRT Python bindings and runtime; no SDK or trtexec required.
+tensorrt-cu12==10.13.3.9
+onnx==1.17.0
+onnxruntime==1.20.1
