@@ -17,6 +17,10 @@ def parser():
     p.add_argument("--cropr-pruning-rate", type=int, default=8,
                    help="Tokens removed per Cropr module; original first module removes one extra")
     p.add_argument("--cropr-llf", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--cls-pruning", choices=["train", "inference", "train_and_inference"],
+                   help="CLS attention Top-K pruning (A3, no learned module); omitted = off")
+    p.add_argument("--cls-pruning-rate", type=int, default=16,
+                   help="Tokens removed per stage (first stage removes one extra), LLF always on")
     p.add_argument("--qat-scope", choices=["all", "backbone"], default="all",
                    help="all also quantizes Cropr; backbone leaves Cropr in FP32")
     p.add_argument("--aux-loss-weight", type=float, default=1.0,
