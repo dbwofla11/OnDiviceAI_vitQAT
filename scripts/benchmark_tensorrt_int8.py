@@ -1,4 +1,4 @@
-"""Export W2-valued INT8 ONNX and benchmark with the TensorRT Python API."""
+"""Evaluate FP32 or W2A8 QAT checkpoints with the TensorRT Python API."""
 import argparse
 import copy
 import csv
@@ -12,7 +12,8 @@ import torch
 from vitqat.cli import parser as training_parser
 from vitqat.models import build_model
 from vitqat.data import loader, make_data
-from vitqat.metrics import measure_vit
+from A3.metrics import measure_vit
+from A3.pruning.checkpoint import checkpoint_model
 from vitqat.tensorrt_int8 import audit_attention_qdq, convert_tensorrt_int8, export_onnx
 from vitqat.training import evaluate, seed_all
 
@@ -71,7 +72,7 @@ def structure_metrics(model, image_size):
 
 def write_metrics_csv(output, report):
     rows = []
-    for name in ("source_qat", "fp32_master", "w2_int8"):
+    for name in ("source_fp32", "fp32", "source_qat", "fp32_master", "w2_int8"):
         if name in report:
             row = dict(backend=name, eval_split=report.get("eval_split"),
                        **report["model_structure"], **report[name])
@@ -238,44 +239,59 @@ def main(argv=None):
         parser.error("--data-root evaluates native engines; omit --export-only")
     if options.download and not options.data_root:
         parser.error("--download requires --data-root")
-    trt = None if options.export_only else require_tensorrt(options.device)
+    output = Path(options.output).resolve()
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
+        parser.error("Choose a new empty output directory")
     checkpoint = torch.load(options.checkpoint, map_location="cpu", weights_only=True)
     config = training_parser().parse_args(["--mode", "qat", "--output", "unused"])
     vars(config).update(checkpoint["config"])
-    if config.mode != "qat" or (config.weight_bits, config.activation_bits) != (2, 8):
-        parser.error("A calibrated W2A8 QAT checkpoint is required")
+    if checkpoint["config"].get("mode") not in ("fp32", "qat"):
+        parser.error("Checkpoint must declare mode fp32 or qat")
+    is_qat = config.mode == "qat"
+    if is_qat and (config.weight_bits, config.activation_bits) != (2, 8):
+        parser.error("TensorRT supports FP32 or calibrated W2A8 QAT checkpoints; other QAT bits require --eval-backend pytorch")
+    trt = None if options.export_only else require_tensorrt(options.device)
     batches, manifest = evaluation_data(config, checkpoint, options) if options.data_root else (None, None)
     seed_all(config.seed)
-    source = build_model(config)
+    source = checkpoint_model(build_model(config), config)
     source.load_state_dict(checkpoint["model"], strict=True)
     source.eval()
-    converted = convert_tensorrt_int8(source)
-    fp_config = copy.copy(config)
-    fp_config.mode = "fp32"
-    fp32 = build_model(fp_config)
-    fp32.load_state_dict({key: checkpoint["model"][key] for key in fp32.state_dict()}, strict=True)
-    fp32.eval()
+    if is_qat:
+        converted = convert_tensorrt_int8(source)
+        fp_config = copy.copy(config)
+        fp_config.mode = "fp32"
+        fp32 = checkpoint_model(build_model(fp_config), fp_config)
+        fp32.load_state_dict({key: checkpoint["model"][key] for key in fp32.state_dict()}, strict=True)
+        fp32.eval()
+        models = {"fp32_master": fp32, "w2_int8": converted}
+    else:
+        models = {"fp32": source}
+    source_name = "source_qat" if is_qat else "source_fp32"
     x = torch.randn(options.batch_size, 3, config.image_size, config.image_size)
-    output = Path(options.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     with torch.inference_mode():
-        expected, actual = source(x), converted(x)
-        references = {"fp32_master": fp32(x), "w2_int8": actual}
+        expected = source(x)
+        references = {name: net(x) for name, net in models.items()}
     report = dict(checkpoint=str(options.checkpoint), torch_version=str(torch.__version__),
+                  checkpoint_mode=config.mode, model=config.model, training_config=checkpoint["config"],
+                  primary_backend="w2_int8" if is_qat else "fp32",
                   batch_size=1, timing_batch_size=1,
                   eval_batch_size=options.eval_batch_size if batches is not None else None,
                   image_size=config.image_size,
-                  weight_values="original W2 grid exported with INT8 Q/DQ; kernel precision unverified",
-                  activations="symmetric INT8 derived from trained affine range; no new calibration",
-                  qat_scope=config.qat_scope,
-                  synthetic_logit_max_abs_error=(expected - actual).abs().max().item(),
-                  synthetic_top1_agreement=(expected.argmax(-1) == actual.argmax(-1)).float().mean().item(),
                   model_structure=structure_metrics(source, config.image_size),
                   structure_note="Source architecture, per image, not measured TensorRT kernel FLOPs; quantization does not reduce arithmetic count",
                   accuracy_evaluation="not_requested" if batches is None else "pending",
                   engine_execution="not_run", kernel_precision_verified=False,
-                  note="Synthetic checks are not Food-101 accuracy. Q/DQ coverage is not proof of INT8 kernels.")
-    for name, net in (("fp32_master", fp32), ("w2_int8", converted)):
+                  note="Synthetic checks are not Food-101 accuracy. Q/DQ coverage is not proof of INT8 kernels." if is_qat
+                       else "FP32 engine uses the original FP32 checkpoint; no QAT master substitution or INT8 conversion.")
+    if is_qat:
+        actual = references["w2_int8"]
+        report.update(weight_values="original W2 grid exported with INT8 Q/DQ; kernel precision unverified",
+                      activations="symmetric INT8 derived from trained affine range; no new calibration",
+                      qat_scope=config.qat_scope,
+                      synthetic_logit_max_abs_error=(expected - actual).abs().max().item(),
+                      synthetic_top1_agreement=(expected.argmax(-1) == actual.argmax(-1)).float().mean().item())
+    for name, net in models.items():
         graph = export_onnx(net, x, output / f"{name}.onnx")
         if name == "w2_int8":
             rows = audit_attention_qdq(graph)
@@ -294,10 +310,11 @@ def main(argv=None):
         (output / "split.json").write_text(json.dumps(manifest), encoding="utf-8")
         report.update(eval_split=options.eval_split, split_hash=manifest["sha256"],
                       data_root=str(options.data_root),
-                      accuracy_note="FP32 master shares QAT master weights; not a separately trained FP32 baseline")
-        print("Evaluating original affine QAT on the same data", flush=True)
+                      accuracy_note="FP32 master shares QAT master weights; not a separately trained FP32 baseline" if is_qat
+                      else "Original PyTorch FP32 and TensorRT FP32 use the same checkpoint and data")
+        print(f"Evaluating {source_name} on the same data", flush=True)
         source_metrics = evaluate(source.to(options.device), batches, options.device)
-        report["source_qat"] = dict(top1_acc=source_metrics["top1_acc"], loss=source_metrics["loss"],
+        report[source_name] = dict(top1_acc=source_metrics["top1_acc"], loss=source_metrics["loss"],
                                     evaluated_samples=source_metrics["samples"], eval_batch_size=options.eval_batch_size)
         source.cpu()
         with torch.cuda.device(options.device):
@@ -309,12 +326,11 @@ def main(argv=None):
                       tf32=False, amp=False, cuda_graph=False,
                       timing="CUDA events, synchronized each forward; excludes build and transfers",
                       warmup=options.warmup, iterations=options.iterations)
-        for name in ("fp32_master", "w2_int8"):
+        for name, net in models.items():
             report["engine_execution"] = f"building_or_running_{name}"
             report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
             print(f"Building/benchmarking {name} with TensorRT Python API", flush=True)
             try:
-                net = fp32 if name == "fp32_master" else converted
                 report[name] = run_backend(trt, output, name, net, x, references[name], options, batches)
                 report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
             except Exception as error:
@@ -322,18 +338,22 @@ def main(argv=None):
                 report["error"] = str(error)
                 report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
                 raise
-        report["gpu_compute_speedup_vs_trt_fp32"] = (
-            report["fp32_master"]["gpu_compute_ms_median"] / report["w2_int8"]["gpu_compute_ms_median"])
-        report["engine_size_ratio_fp32_to_int8"] = (
-            report["fp32_master"]["storage_engine_bytes"] / report["w2_int8"]["storage_engine_bytes"])
+        if is_qat:
+            report["gpu_compute_speedup_vs_trt_fp32"] = (
+                report["fp32_master"]["gpu_compute_ms_median"] / report["w2_int8"]["gpu_compute_ms_median"])
+            report["engine_size_ratio_fp32_to_int8"] = (
+                report["fp32_master"]["storage_engine_bytes"] / report["w2_int8"]["storage_engine_bytes"])
         if batches is not None:
-            counts = [report[name]["evaluated_samples"] for name in ("source_qat", "fp32_master", "w2_int8")]
+            counts = [report[name]["evaluated_samples"] for name in (source_name, *models)]
             if any(count != len(batches.dataset) for count in counts):
                 raise RuntimeError("Accuracy evaluation did not cover the complete selected split")
-            report["int8_top1_drop_vs_source_qat_pp"] = report["source_qat"]["top1_acc"] - report["w2_int8"]["top1_acc"]
-            report["int8_top1_drop_vs_trt_fp32_pp"] = report["fp32_master"]["top1_acc"] - report["w2_int8"]["top1_acc"]
+            if is_qat:
+                report["int8_top1_drop_vs_source_qat_pp"] = report["source_qat"]["top1_acc"] - report["w2_int8"]["top1_acc"]
+                report["int8_top1_drop_vs_trt_fp32_pp"] = report["fp32_master"]["top1_acc"] - report["w2_int8"]["top1_acc"]
+            else:
+                report["fp32_top1_drop_vs_source_pp"] = report["source_fp32"]["top1_acc"] - report["fp32"]["top1_acc"]
             report["accuracy_evaluation"] = "completed"
-        report["engine_execution"] = "completed; inspect layer reports to confirm INT8 attention kernels"
+        report["engine_execution"] = "completed; inspect layer reports to confirm INT8 attention kernels" if is_qat else "completed"
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         write_metrics_csv(output, report)
     print(json.dumps(report, indent=2))

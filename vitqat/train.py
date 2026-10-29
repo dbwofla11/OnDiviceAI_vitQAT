@@ -14,7 +14,10 @@ def train_epoch(model, batches, optimizer, args, epoch, steps_per_epoch):
 
 
 def measure_model(model, args):
-    metrics = measure_vit(model, args.image_size, args.device,
+    measure = measure_vit
+    if getattr(args, "cls_pruning", None):
+        from A3.metrics import measure_vit as measure
+    metrics = measure(model, args.image_size, args.device,
                                 args.latency_warmup, args.latency_repeats)
     metrics.update(model=args.model, mode=args.mode, use_cropr=args.use_cropr,
                    cropr_pruning_rate=args.cropr_pruning_rate if args.use_cropr else 0,
@@ -26,7 +29,24 @@ def measure_model(model, args):
 
 def main(args):
     if args.eval_checkpoint:
-        return run(args, build_model=build_model, measure_model=measure_model, train_epoch_fn=train_epoch)
+        if args.resume:
+            raise ValueError("Choose resume or eval-checkpoint")
+        if args.eval_backend == "tensorrt":
+            import torch
+            from scripts.benchmark_tensorrt_int8 import main as evaluate_tensorrt
+
+            if args.threads > 0:
+                torch.set_num_threads(args.threads)
+            options = ["--checkpoint", args.eval_checkpoint, "--output", args.output,
+                       "--data-root", args.data_root, "--device", args.device,
+                       "--eval-batch-size", str(args.batch_size), "--workers", str(args.workers),
+                       "--warmup", str(args.latency_warmup), "--iterations", str(args.latency_repeats)]
+            if args.download:
+                options.append("--download")
+            return evaluate_tensorrt(options)
+        from A3.pruning.checkpoint import checkpoint_model
+        return run(args, build_model=lambda config: checkpoint_model(build_model(config), config),
+                   measure_model=measure_model, train_epoch_fn=train_epoch)
     if args.mode is None:
         raise ValueError("--mode is required for training")
     if args.aux_loss_weight < 0:

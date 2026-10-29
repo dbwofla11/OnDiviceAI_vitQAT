@@ -9,6 +9,7 @@ import torch
 from A3.eval_pruning import inherited_args, sha256_file, validate_qat_state
 from A3.metrics import measure_vit
 from A3.pruning import attach_pruning
+from A3.pruning.checkpoint import checkpoint_model, pruning_config
 from scripts.benchmark_tensorrt_int8 import evaluation_data, require_tensorrt, run_backend
 from vitqat.models import build_model
 from vitqat.quantization import Quantizer
@@ -46,7 +47,8 @@ def main(argv=None):
     batches, manifest = (None, None) if options.export_only else evaluation_data(config, checkpoint, options)
     seed_all(config.seed)
     source = build_model(config).cpu().eval()
-    source.load_state_dict(checkpoint["model"], strict=True)
+    checkpoint_model(source, config).load_state_dict(checkpoint["model"], strict=True)
+    source.eval()
     validate_qat_state(source)
     for module in source.modules():
         if isinstance(module, Quantizer):
@@ -54,8 +56,8 @@ def main(argv=None):
             module.fake_quant.disable_observer()
     source.requires_grad_(False)
     dense = convert_tensorrt_int8(source)
-    source_pruned = attach_pruning(source).eval()
-    pruned = attach_pruning(dense).eval()
+    source_pruned = attach_pruning(source, config=pruning_config(config)).eval()
+    pruned = attach_pruning(dense, config=pruning_config(config)).eval()
     # Real evaluation sample for native timing; synthetic input for export smoke checks only.
     x = (torch.randn(1, 3, config.image_size, config.image_size) if batches is None
          else batches.dataset[0][0].unsqueeze(0))
@@ -65,7 +67,7 @@ def main(argv=None):
                   kernel_precision_verified=False, timing_batch_size=1,
                   timing_input="synthetic" if batches is None else f"{options.eval_split}[0]",
                   pruning=pruned.config.describe(len(dense.blocks), dense.patch_embed.num_patches),
-                  note="W2 values in INT8 Q/DQ, symmetric A8 remapping; no INT2 kernels. Inspect layer reports for actual INT8 kernels.",
+                  note="Both variants use the same checkpoint weights; dense disables inference pruning, including for pruning-trained checkpoints. W2 values in INT8 Q/DQ, symmetric A8 remapping; no INT2 kernels. Inspect layer reports for actual INT8 kernels.",
                   results={})
     output.mkdir(parents=True, exist_ok=True)
     report_path = output / "report.json"

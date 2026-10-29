@@ -180,8 +180,44 @@ FP32와 QAT 모두 명시적 attention matmul을 사용한다.
 중단된 실행은 **원래와 같은 설정**에 `--resume runs/1-2_w2a2/last.pt`를 추가한다.
 동일한 output 폴더와 그 폴더의 best.pt가 필요하다. 정밀도, seed, 학습 길이 등 불일치는 오류로 처리한다.
 일반 실행에서 비어 있지 않은 output을 덮어쓰지 않는다.
-다시 평가하려면 원래 학습 옵션에 `--eval-checkpoint runs/1-2_w2a2/best.pt`와 새로운 `--output`을 지정한다.
-`--epochs`, `--warmup-epochs` 등 checkpoint 설정도 원래 값과 맞춘다.
+체크포인트 재평가(`--eval-checkpoint`)는 기본적으로 **TensorRT 엔진**에서 정확도와 latency를 측정한다.
+모델 구조와 학습 설정은 체크포인트에서 복원한다. CUDA PyTorch 환경에서
+`python -m pip install -r requirements-tensorrt.txt`로 TensorRT 의존성을 설치한다.
+
+```bash
+# 1-1: 실제 FP32 체크포인트 → TensorRT FP32
+python -m vitqat.train \
+  --eval-checkpoint runs/1-1_fp32/best.pt \
+  --output runs/1-1_trt_eval --data-root /data --device cuda:0 \
+  --batch-size 128 --latency-warmup 20 --latency-repeats 100
+
+# 1-2: W2A8 QAT 체크포인트 → TensorRT INT8 (+ FP32 master 비교 엔진)
+python -m vitqat.train \
+  --eval-checkpoint runs/1-2_small_w2a8_aug/best.pt \
+  --output runs/1-2_trt_eval --data-root /data --device cuda:0 \
+  --batch-size 128 --latency-warmup 20 --latency-repeats 100
+```
+
+출력은 새 빈 폴더를 지정한다. TensorRT 결과는 `report.json`과 backend별 `metrics.csv`에 저장하며,
+FP32 체크포인트의 주 결과는 `fp32`, W2A8의 주 결과는 `w2_int8`이다.
+원본 PyTorch 정확도도 별도 기록한다. 이전 PyTorch 전용 `metrics.json`과 스키마가 다르다.
+정확도는 선택한 batch로 test split 전체를 평가하고 split hash를 검증한다.
+시간은 항상 batch 1의 고정 합성 입력에서 전용 CUDA stream과 CUDA event로 측정한다.
+mean/median/p95 필드는 `gpu_compute_ms_*`이며, 빌드·데이터 로딩·입출력 전송은 제외한다.
+TF32/FP16/AMP/CUDA Graph는 켜지 않는다. 원본 체크포인트는 수정하지 않는다.
+
+TensorRT 자동 변환은 현재 FP32와 W2A8만 지원한다. W2A2/W4A8 등 다른 설정이나 CPU 환경에서
+기존 평가가 필요하면 `--eval-backend pytorch`를 명시한다. 자동 fallback은 하지 않는다.
+
+```bash
+python -m vitqat.train --eval-checkpoint runs/1-2_w2a2/best.pt \
+  --output runs/1-2_pytorch_eval --data-root /data --eval-backend pytorch
+```
+
+학습 중 validation과 학습 종료 직후 test/지표 측정은 기존 PyTorch 경로를 유지한다.
+아래의 `latency_ms_*` 설명은 이 기존 경로에 해당한다. A3 TensorRT paired 평가는
+별도의 `python -m A3.benchmark_tensorrt_int8` 명령을 사용한다.
+재평가에서는 `--epochs`, `--warmup-epochs` 등 학습 설정을 다시 지정할 필요가 없다.
 
 ## 지표의 의미
 

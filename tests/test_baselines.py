@@ -177,6 +177,7 @@ def test_end_to_end_real_food101_loader_on_fixture(food_fixture, mode):
     assert metrics["top1_acc"] == resumed["top1_acc"]
     args.resume = None
     args.eval_checkpoint = str(out / "best.pt")
+    args.eval_backend = "pytorch"
     args.output = str(food_fixture / f"{mode}_eval")
     evaluated = main(args)
     assert metrics["top1_acc"] == evaluated["top1_acc"]

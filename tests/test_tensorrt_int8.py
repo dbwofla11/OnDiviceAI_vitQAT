@@ -29,6 +29,72 @@ def test_w2_values_preserved_and_source_untouched():
     assert all(torch.equal(value, layer.state_dict()[key]) for key, value in before.items())
 
 
+def test_fp32_checkpoint_export_and_runtime(tmp_path):
+    ort = pytest.importorskip("onnxruntime")
+    import onnx
+    from vitqat.cli import parser
+    from vitqat.models import build_model
+    from scripts.benchmark_tensorrt_int8 import main
+
+    torch.set_num_threads(2)
+    config = parser().parse_args(["--mode", "fp32", "--image-size", "32", "--output", "unused"])
+    source = build_model(config).eval()
+    path = tmp_path / "fp32.pt"
+    torch.save(dict(config=vars(config), model=source.state_dict()), path)
+    output = tmp_path / "export"
+    report = main(["--checkpoint", str(path), "--output", str(output), "--export-only"])
+    assert report["checkpoint_mode"] == report["primary_backend"] == "fp32"
+    assert report["engine_execution"] == "not_run"
+    assert "weight_values" not in report and "attention_onnx" not in report
+    assert not (output / "w2_int8.onnx").exists()
+    assert not (output / "fp32_master.onnx").exists()
+    graph = onnx.load(str(output / "fp32.onnx"))
+    assert not any(node.op_type in ("QuantizeLinear", "DequantizeLinear") for node in graph.graph.node)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 2
+    session = ort.InferenceSession(str(output / "fp32.onnx"), options, providers=["CPUExecutionProvider"])
+    x = torch.randn(1, 3, 32, 32)
+    with torch.no_grad():
+        expected = source(x)
+    actual = torch.from_numpy(session.run(None, {"images": x.numpy()})[0])
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-4)
+    with pytest.raises(SystemExit):
+        main(["--checkpoint", str(path), "--output", str(output), "--export-only"])
+    config.mode = "qat"  # Unsupported W2A2 must fail before GPU or model construction.
+    torch.save(dict(config=vars(config), model=source.state_dict()), path)
+    with pytest.raises(SystemExit):
+        main(["--checkpoint", str(path), "--output", str(tmp_path / "unsupported"), "--export-only"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Native TensorRT requires CUDA PyTorch")
+def test_fp32_checkpoint_native_evaluation(tmp_path, monkeypatch):
+    pytest.importorskip("tensorrt")
+    from torch.utils.data import DataLoader, TensorDataset
+    from scripts import benchmark_tensorrt_int8 as runner
+    from vitqat.cli import parser
+    from vitqat.models import build_model
+    from vitqat.train import main
+
+    torch.set_num_threads(2)
+    config = parser().parse_args(["--mode", "fp32", "--image-size", "32", "--output", "unused"])
+    source = build_model(config).eval()
+    path = tmp_path / "fp32.pt"
+    torch.save(dict(config=vars(config), model=source.state_dict()), path)
+    batches = DataLoader(TensorDataset(torch.randn(3, 3, 32, 32), torch.zeros(3, dtype=torch.long)), batch_size=2)
+    monkeypatch.setattr(runner, "evaluation_data", lambda *args: (batches, {"sha256": "synthetic"}))
+    output = tmp_path / "native"
+    args = parser().parse_args(["--eval-checkpoint", str(path), "--output", str(output),
+        "--device", "cuda", "--batch-size", "2", "--latency-warmup", "0", "--latency-repeats", "2"])
+    report = main(args)
+    assert report["engine_execution"] == report["accuracy_evaluation"] == "completed"
+    assert report["fp32"]["evaluated_samples"] == report["source_fp32"]["evaluated_samples"] == 3
+    assert report["fp32"]["gpu_compute_ms_median"] > 0
+    assert report["fp32"]["cuda_stream"] == "dedicated_non_default"
+    assert "gpu_compute_speedup_vs_trt_fp32" not in report
+    with (output / "metrics.csv").open(newline="", encoding="utf-8") as handle:
+        assert {row["backend"] for row in csv.DictReader(handle)} == {"source_fp32", "fp32"}
+
+
 def test_reject_uncalibrated_or_wrong_bits():
     layer = QATLinear(8, 4)
     layer.input_quant = Quantizer(8)

@@ -117,7 +117,7 @@ def save_checkpoint(path, model, optimizer, epoch, best, args, split_hash):
 def read_checkpoint(path, model, args, split_hash, optimizer=None):
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     ignored = {"resume", "eval_checkpoint", "output", "data_root", "download", "device", "workers",
-               "latency_warmup", "latency_repeats", "threads"}
+               "latency_warmup", "latency_repeats", "threads", "eval_backend"}
     # 증강 옵션이 생기기 전의 옛 checkpoint에는 증강 키가 없다. 없는 키는 "꺼짐"으로 학습한 것으로 간주해서
     # 비교해야, 옛 checkpoint를 --mixup 등을 켠 채로 이어 학습해 실험이 섞이는 일을 막을 수 있다.
     saved_config = {**AUGMENT_DEFAULTS, **checkpoint["config"]}

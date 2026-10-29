@@ -8,7 +8,8 @@ import torch
 from A3.tests.test_inference_pruning import settings, small_fixture_model
 
 
-def test_paired_export(tmp_path, monkeypatch):
+@pytest.mark.parametrize("trained_pruning", [False, True])
+def test_paired_export(tmp_path, monkeypatch, trained_pruning):
     ort = pytest.importorskip("onnxruntime")
     from A3 import benchmark_tensorrt_int8 as runner
     from A3.pruning import attach_pruning
@@ -19,6 +20,11 @@ def test_paired_export(tmp_path, monkeypatch):
     config = settings(tmp_path)
     config.weight_bits = 2
     model = small_fixture_model(config)
+    rate = 8 if trained_pruning else 16
+    if trained_pruning:
+        config.cls_pruning = "train_and_inference"
+        config.cls_pruning_rate = rate
+        model = attach_pruning(model, pruning_rate=rate, apply_during=config.cls_pruning)
     model(torch.randn(2, 3, 224, 224))
     model.eval()
     state = copy.deepcopy(model.state_dict())
@@ -29,13 +35,13 @@ def test_paired_export(tmp_path, monkeypatch):
     report = runner.main(["--checkpoint", str(checkpoint), "--output", str(output), "--export-only"])
     assert report["engine_execution"] == "not_run"
     assert report["kernel_precision_verified"] is False
-    assert report["results"]["a3_int8"]["tokens_per_block"] == [197, 180, 164, 148, 132, 116, 100, 84, 68, 52, 36, 197]
+    assert report["results"]["a3_int8"]["tokens_per_block"] == [197] + [196 - rate * i for i in range(1, 11)] + [197]
     assert report["results"]["dense_int8"]["tokens_per_block"] == [197] * 12
     assert report["results"]["a3_int8"]["gflops"] < report["results"]["dense_int8"]["gflops"]
     saved = torch.load(checkpoint, weights_only=True)["model"]
     assert all(torch.equal(v, saved[k]) for k, v in state.items())
-    converted = convert_tensorrt_int8(model)
-    models = {"dense_int8": converted, "a3_int8": attach_pruning(converted).eval()}
+    converted = convert_tensorrt_int8(model.backbone if trained_pruning else model)
+    models = {"dense_int8": converted, "a3_int8": attach_pruning(converted, pruning_rate=rate).eval()}
     session_options = ort.SessionOptions()
     session_options.intra_op_num_threads = 2
     session_options.inter_op_num_threads = 1
@@ -51,7 +57,12 @@ def test_paired_export(tmp_path, monkeypatch):
             actual = session.run(None, {"images": x.numpy()})[0]
             assert np.isfinite(actual).all()
             # Numerical errors can change quantization bins and tied token rankings.
-            assert np.linalg.norm(actual - expected) / max(np.linalg.norm(expected), 1e-6) < 0.05
+            if trained_pruning:
+                # Same eight-output-bin bound as the W2A8 export regression:
+                # Q/DQ rounding can change tied attention rankings across runtimes.
+                np.testing.assert_allclose(actual, expected, atol=float(converted.head.output_quant.scale) * 8, rtol=0)
+            else:
+                assert np.linalg.norm(actual - expected) / max(np.linalg.norm(expected), 1e-6) < 0.05
     x = torch.randn(2, 3, 224, 224)
     path = output / "a3_int8_eval_b2.onnx"
     export_onnx(models["a3_int8"], x, path)
@@ -60,7 +71,10 @@ def test_paired_export(tmp_path, monkeypatch):
         expected = models["a3_int8"](x).numpy()
     actual = session.run(None, {"images": x.numpy()})[0]
     assert actual.shape == (2, 101)
-    assert np.linalg.norm(actual - expected) / max(np.linalg.norm(expected), 1e-6) < 0.05
+    if trained_pruning:
+        np.testing.assert_allclose(actual, expected, atol=float(converted.head.output_quant.scale) * 8, rtol=0)
+    else:
+        assert np.linalg.norm(actual - expected) / max(np.linalg.norm(expected), 1e-6) < 0.05
     assert (output / "metrics.csv").is_file()
     with pytest.raises(SystemExit):
         runner.main(["--checkpoint", str(checkpoint), "--output", str(output), "--export-only"])

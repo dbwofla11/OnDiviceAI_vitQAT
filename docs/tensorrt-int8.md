@@ -1,5 +1,16 @@
 # W2 가중치를 유지하는 TensorRT INT8 실행
 
+## FP32 체크포인트 평가도 지원
+
+`python -m vitqat.train --eval-checkpoint ... --output ...`는 이제 기본적으로
+TensorRT에서 평가한다. FP32 체크포인트는 원래 가중치를 그대로 사용한 `fp32` 엔진으로,
+W2A8 체크포인트는 기존 `fp32_master`/`w2_int8` 엔진으로 평가한다.
+아래 독립 benchmark CLI도 FP32 체크포인트를 자동 인식하며 `--export-only`를 지원한다.
+`fp32_master`는 QAT 가중치의 FP32 표현이고, `fp32`는 별도로 학습한 FP32 체크포인트이므로
+결과 이름을 구분한다. [평가 명령과 결과 형식](experiments.md)을 참조한다.
+기존 PyTorch 평가를 원하면 `--eval-backend pytorch`를 지정한다.
+TensorRT 출력 폴더는 새 빈 폴더여야 한다.
+
 기존 W2A8 QAT 체크포인트를 TensorRT용 explicit INT8 Q/DQ ONNX로 내보낸다.
 Linear/Conv뿐 아니라 backbone attention의 Q/K/V, softmax 확률에도 INT8 Q/DQ를 넣는다.
 TensorRT가 실제로 선택한 커널은 엔진의 레이어 보고서로 별도 확인해야 한다.
@@ -202,3 +213,23 @@ Python API 전환 후 PyTorch 2.3 CPU에서 관련 테스트는 9 passed, native
 참고: [TensorRT explicit quantization](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/inference-library/work-quantized-types.html),
 [엔진 검사 도구](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/engine-tools.html),
 [TensorRT Python API](https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/python-api-docs.html).
+
+## Experiment 1-d checkpoints
+
+W2A8 checkpoints trained with CLS pruning are supported by both TensorRT entry points.
+The saved cls_pruning policy and cls_pruning_rate restore the wrapper before strict state loading; backbone-prefixed weights and quantizer buffers are preserved.
+
+For the checkpoint inference policy (including train-only pruning evaluating dense):
+
+```powershell
+python -m scripts.benchmark_tensorrt_int8 --checkpoint runs/1-d/best.pt --output runs/1-d-trt --data-root data --device cuda
+```
+
+For a paired dense/pruned comparison using the saved pruning rate:
+
+```powershell
+python -m A3.benchmark_tensorrt_int8 --checkpoint runs/1-d/best.pt --output runs/1-d-a3-trt --data-root data --device cuda
+```
+
+Both A3 variants share the same trained weights. The dense result disables inference pruning; it is not an independently trained dense baseline. A3.eval_pruning also accepts these checkpoints for PyTorch comparison.
+Use --export-only without --data-root for CPU export checks on the general entry point. Native TensorRT execution still requires CUDA and TensorRT.

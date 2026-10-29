@@ -34,8 +34,16 @@ def inputs(food_fixture):
     return args, model, manifest, bundle, options
 
 
-def test_paired_pipeline_inherits_config_and_preserves_inputs(inputs):
+@pytest.mark.parametrize("trained_pruning", [False, True])
+def test_paired_pipeline_inherits_config_and_preserves_inputs(inputs, trained_pruning):
     args, model, manifest, bundle, options = inputs
+    rate = 8 if trained_pruning else 16
+    if trained_pruning:
+        from A3.pruning import attach_pruning
+        checkpoint = torch.load(options.checkpoint, weights_only=True)
+        checkpoint["config"].update(cls_pruning="train_and_inference", cls_pruning_rate=rate)
+        checkpoint["model"] = attach_pruning(model, pruning_rate=rate, apply_during="train_and_inference").state_dict()
+        torch.save(checkpoint, options.checkpoint)
     before = sha256_file(options.checkpoint)
     result = run(options, model_factory=small_fixture_model)
     assert result["backbone_state_unchanged"]
@@ -54,7 +62,7 @@ def test_paired_pipeline_inherits_config_and_preserves_inputs(inputs):
     assert dense["split_hash"] == pruned["split_hash"] == manifest["sha256"]
     assert dense["test_samples"] == pruned["test_samples"] == 101
     assert dense["token_pruning_ratio"] == 0
-    assert pruned["tokens_per_block"] == [197,180,164,148,132,116,100,84,68,52,36,197]
+    assert pruned["tokens_per_block"] == [197] + [196 - rate * i for i in range(1, 11)] + [197]
     assert pruned["params"] - dense["params"] == 0
     assert result["top1_loss_pp"] == dense["top1_acc"] - pruned["top1_acc"]
     assert (output / "comparison.csv").exists()

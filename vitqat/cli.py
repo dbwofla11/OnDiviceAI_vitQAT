@@ -53,6 +53,8 @@ def parser():
     p.add_argument("--val-fraction", type=float, default=0.1)
     p.add_argument("--resume")
     p.add_argument("--eval-checkpoint")
+    p.add_argument("--eval-backend", choices=["tensorrt", "pytorch"], default="tensorrt",
+                   help="Backend for --eval-checkpoint; TensorRT requires CUDA and FP32/W2A8. Training is unchanged.")
     p.add_argument("--latency-warmup", type=int, default=10)
     p.add_argument("--latency-repeats", type=int, default=100)
     return p

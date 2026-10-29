@@ -12,7 +12,8 @@ import torchvision
 
 from vitqat.augment import AUGMENT_DEFAULTS
 from vitqat.data import loader, make_data
-from .pruning import attach_pruning, PruningConfig
+from .pruning import attach_pruning
+from .pruning.checkpoint import checkpoint_model, pruning_config
 from .metrics import measure_vit
 from vitqat.models import build_model
 from vitqat.quantization import Quantizer, freeze_observers
@@ -118,7 +119,7 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
     if manifest["sha256"] != checkpoint.get("split_hash"):
         raise ValueError("Checkpoint data split does not match")
     model = model_factory(args).to(args.device)
-    read_checkpoint(options.checkpoint, model, args, manifest["sha256"])
+    read_checkpoint(options.checkpoint, checkpoint_model(model, args), args, manifest["sha256"])
     validate_qat_state(model)
     model.eval()
     freeze_observers(model, True)
@@ -126,7 +127,7 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
         if isinstance(module, Quantizer):
             module.fake_quant.disable_observer()
     model.requires_grad_(False)
-    pruning = PruningConfig()
+    pruning = pruning_config(args)
     pruned = attach_pruning(model, config=pruning, apply_during="inference")
     original_state = state_digest(model)
     if len(val_data) == 0:
