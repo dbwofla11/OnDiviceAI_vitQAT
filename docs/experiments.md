@@ -121,6 +121,26 @@ Top-k 선택 자체는 미분되지 않으므로 learnable queries의 학습에�
 QAT scope=all에서는 학습/평가 scorer의 query/key quantizer를 공유한다.
 Cropr의 query 수와 head 수는 각 1개이며, q/k/v projection은 원본 기본값인 Identity를 사용한다.
 
+## CLS attention token pruning 옵션
+
+학습 모듈 없이 CLS가 각 패치에 주는 attention(head 평균)의 Top-K로 token을 고르는 A3 pruning을
+`vitqat.train`에서 켠다. 위치·제거 개수·LLF는 Cropr 스케줄을 따른다. 상세는 [library-api.md](library-api.md).
+
+| 옵션 | 기본값 / 의미 |
+|---|---|
+| `--cls-pruning train` | 학습만 pruning, 검증/평가는 전체 token |
+| `--cls-pruning inference` | 학습은 전체 token, 검증/평가만 pruning (best 선택도 pruned 기준) |
+| `--cls-pruning train_and_inference` | 학습·검증·평가 모두 pruning (QAT와 pruning 동시 적용) |
+| `--cls-pruning-rate` | 16. 첫 단계는 +1개 제거, LLF 항상 켜짐 |
+
+생략하면 꺼진다. `--use-cropr`와 함께 쓸 수 없다. 결과에 `cls_pruning`, `cls_pruning_rate`가 기록된다.
+pruning 모듈은 학습 파라미터가 없어 같은 seed에서 QAT only와 초기값이 같고, weight decay 그룹도 같다.
+QAT only 추론 시 pruning 평가(실험 1-c)는 이 옵션이 아니라 `python -m A3.eval_pruning`을 쓴다.
+
+```powershell
+python -m vitqat.train --mode qat --cls-pruning train_and_inference --model vit_small_patch16_224 --data-root data --output runs/1-d_w2a2 --device cuda --experiment 1-d
+```
+
 ## 공통 학습 조건
 
 기본값은 입력 224, 300 epochs, warmup 20 epochs, batch 128, accumulation 1, AdamW,
