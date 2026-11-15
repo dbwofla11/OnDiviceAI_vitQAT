@@ -23,7 +23,7 @@ from PIL import Image
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
-from vitqat.augment import AUGMENT_DEFAULTS, augment_batch, build_mixup, build_train_transform
+from utils.augment import AUGMENT_DEFAULTS, augment_batch, build_mixup, build_train_transform
 
 # data.py와 같은 정규화. 저장할 때는 아래 denormalize로 되돌려야 원래 색으로 보인다.
 MEAN, STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
@@ -78,7 +78,7 @@ def main():
     print(f"[same_image.png] 클래스={name(label)}  윗줄=기본 증강, 아랫줄=지정 옵션")
 
     # 2) Mixup/CutMix 배치 확인
-    mixup_fn = build_mixup(args.mixup, args.cutmix, LABEL_SMOOTHING)
+    mixup_fn = build_mixup(args.mixup, args.cutmix, LABEL_SMOOTHING, num_classes=101)
     if mixup_fn is None:
         print("[mixed_batch.png] --mixup/--cutmix가 0이라 생략")
         return

@@ -3,11 +3,11 @@ import json
 import pytest
 import torch
 
-from vitqat.data import make_data
+from utils.data import make_food101_data as make_data
 from A3.eval_pruning import (inherited_args, parser, run,
                                  sha256_file, validate_qat_state)
 from A3.inference_pruning import PruningConfig
-from vitqat.training import save_checkpoint
+from utils.checkpoint import save_checkpoint
 from A3.tests.test_inference_pruning import fixture_queries, settings, small_fixture_model
 
 
@@ -72,7 +72,7 @@ def test_checkpoint_contract_and_observer_validation(inputs):
     uncalibrated = small_fixture_model(args)
     with pytest.raises(ValueError, match="observers"):
         validate_qat_state(uncalibrated)
-    from vitqat.quantization import Quantizer
+    from A3.quantization import Quantizer
     next(m for m in model.modules() if isinstance(m, Quantizer)).fake_quant.disable_fake_quant()
     with pytest.raises(ValueError, match="fake quantization"):
         validate_qat_state(model)

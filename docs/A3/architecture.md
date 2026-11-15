@@ -6,7 +6,7 @@
 
 ## 1. 입력과 확장 경계
 
-코드는 `A3/`, 이 실험의 문서는 `docs/A3/`, 전용 테스트는 `A3/tests/`에만 추가한다. 기존 `vitqat/`와 `cropr/`는 수정하지 않는다. 지표 확장도 공통 `vitqat/metrics.py`가 아닌 `A3/metrics.py`에서 수행한다.
+실험 전용 평가 코드는 `A3/`, 문서는 `docs/A3/`, 전용 테스트는 `A3/tests/`에 둔다. A3 전용 pruning과 지표는 `A3/pruning/`, `A3/metrics.py`로 분리했다. `cropr/` 원본은 유지한다.
 
 모델·데이터·pooling·QAT bit/구현·학습 및 평가 설정은 앞선 QAT-only 실험의 실제 config/checkpoint를 그대로 따른다. 이 문서의 Small/16·224·W4A8은 예상 예시이며 별도 고정 요구사항이 아니다. 구현은 상속한 모델 구조와 추가 pruning 설정의 호환성을 검사하며, 예시와 다르다는 이유로 backbone이나 학습 설정을 변경하지 않는다.
 
@@ -30,9 +30,9 @@ Dense/pruned의 backbone weight와 quantizer buffer는 동일하며 평가 전�
 
 | 파일 | 현재/예정 | 책임 |
 |---|---|---|
-| `vitqat/models.py` | 기존 재사용 | 전달 config로 dense QAT 모델 생성 |
-| `vitqat/quantization.py` | 기존 유지 | QAT backbone 연산, CLS attention callback 추가 불필요 |
-| `vitqat/training.py` | 기존 재사용 | 원래 config와 split 기준 strict checkpoint load, evaluate |
+| `A3/model.py` | 기존 재사용 | 전달 config로 dense QAT 모델 생성 |
+| `A3/quantization.py` | 기존 유지 | QAT backbone 연산, CLS attention callback 추가 불필요 |
+| `utils/checkpoint.py`, `utils/classification.py` | 재사용 | 원래 config와 split 기준 strict checkpoint load, CE/Top-1 평가 |
 | `A3/pruning/inference.py` | 구현 | 학습된 query router, selector, 제거 feature cache, LLF, trace |
 | `A3/pruning/model.py` | 구현 | 공개 attach API, train/eval 모드 분기, 보조 출력 및 query export |
 | `A3/inference_pruning.py` | 호환 | 이전 import 경로의 re-export |

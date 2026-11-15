@@ -21,7 +21,7 @@ Mixup, CutMix, RandomErasing을 **옵션으로 켜고 끌 수 있게** 한 기�
 
 - **켜기**: 학습 명령에 옵션을 추가한다. 옵션마다 독립적이라 원하는 것만 골라 쓴다.
 - **끄기**: 옵션을 생략한다 (또는 값을 0으로 준다). 기본 실행이 곧 "증강 추가 없음"이다.
-- **다른 실험에 적용**: `--mode qat`, `--use-cropr` 등 기존 옵션과 그대로 함께 쓴다. 증강 옵션은 모델·QAT 설정과 무관하다.
+- **다른 실험에 적용**: `A1.train`, `A2.train`, `B2.train` 등 해당 실험 진입점에 같은 증강 옵션을 전달한다. 증강 옵션은 모델·QAT 설정과 무관하다.
 
 | 조합 | 옵션 | 비고 |
 |---|---|---|
@@ -33,9 +33,9 @@ Mixup, CutMix, RandomErasing을 **옵션으로 켜고 끌 수 있게** 한 기�
 
 ```powershell
 # 같은 증강 설정으로 FP32 / QAT / Cropr+QAT를 실행 (모드만 바꾼다)
-python -m vitqat.train --mode fp32 --output runs/aug_fp32 --mixup 0.8 --cutmix 1.0 --random-erasing 0.25
-python -m vitqat.train --mode qat  --output runs/aug_qat  --mixup 0.8 --cutmix 1.0 --random-erasing 0.25
-python -m vitqat.train --mode qat --use-cropr --output runs/aug_cropr --mixup 0.8 --cutmix 1.0 --random-erasing 0.25
+python -m A1.train --mode fp32 --output runs/aug_fp32 --mixup 0.8 --cutmix 1.0 --random-erasing 0.25
+python -m A2.train --mode qat  --output runs/aug_qat  --mixup 0.8 --cutmix 1.0 --random-erasing 0.25
+python -m B2.train --mode qat --use-cropr --output runs/aug_cropr --mixup 0.8 --cutmix 1.0 --random-erasing 0.25
 ```
 
 **무엇을 켤지 정하는 기준** (일반적인 경향이며 이 레포에서 검증된 값은 아니다):
@@ -88,11 +88,12 @@ python -m vitqat.train --mode qat --use-cropr --output runs/aug_cropr --mixup 0.
 
 | 파일 | 역할 |
 |---|---|
-| [vitqat/augment.py](../vitqat/augment.py) | 증강 로직 (transform 조립, Mixup 생성, 배치 증강, 옵션 값 검사, 옵션 기본값) |
-| [vitqat/data.py](../vitqat/data.py) | train transform만 `augment.py`로 교체 |
-| [vitqat/training.py](../vitqat/training.py) | `train_epoch`에서 배치 증강 호출과 손실 선택 (Mixup 켜짐 시 `SoftTargetCrossEntropy`), checkpoint 비교 |
-| [vitqat/cli.py](../vitqat/cli.py), [vitqat/runner.py](../vitqat/runner.py) | 옵션 정의, 검사 호출 |
-| [vitqat/constants.py](../vitqat/constants.py) | 클래스 수(101) 공용 상수 |
+| [utils/augment.py](../utils/augment.py) | 증강 로직 (transform 조립, Mixup 생성, 배치 증강, 옵션 값 검사, 옵션 기본값) |
+| [utils/data.py](../utils/data.py) | train transform만 `augment.py`로 교체 |
+| 각 실험 `train.py` (예: [A2](../A2/train.py)) | 해당 `train_epoch`에서 배치 증강·criterion 선택 |
+| [utils/checkpoint.py](../utils/checkpoint.py) | 실험이 제공한 구형 설정 기본값으로 checkpoint 비교 |
+| 각 실험 `config.py` (예: [A2](../A2/config.py)) | 증강 CLI 정의·검증; 추론 CLI에는 학습 증강 인자를 노출하지 않음 |
+| [utils/constants.py](../utils/constants.py) | 클래스 수(101) 공용 상수 |
 
 ## 확인 방법
 

@@ -157,4 +157,4 @@ Query는 ViT-S D=384일 때 `10 × 384 = 3,840`개 FP32 parameter, 순수 payloa
 - [vision_transformer.py](../../cropr/cls/vision_transformer.py): schedule 첫 단계 +1, LLF on의 `depth-2`개 모듈, 마지막 block 앞 concatenate.
 - [cropr.py](../../cropr/cls/cropr.py): `forward_scorer`, CLS 보존, score 내림차순 선택, 학습 aggregator 및 stop-gradient.
 - [main.py](../../cropr/cls/main.py): Cropr query/head/projection/LN/MLP 기본 옵션.
-- [cropr_adapter.py](../../vitqat/cropr_adapter.py): 현재 프로젝트의 생성 옵션과 원본 연결.
+- [B2/cropr_adapter.py](../../B2/cropr_adapter.py): learned-query Cropr 실험의 생성 옵션과 원본 연결.

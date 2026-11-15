@@ -4,7 +4,7 @@
 
 ## A3 폴더 경계
 
-이번 실험 코드는 저장소 루트의 `A3/`, 문서는 `docs/A3/`에 둔다. 기존 `vitqat/`·`cropr/` 소스와 기존 `tests/`는 수정하지 않는다. A3는 모델 생성/체크포인트 로드를 기존 모듈에서 import하고, 추론 wrapper와 지표 계산 및 테스트는 별도로 관리한다.
+실험 진입점과 평가 테스트는 `A3/`, 문서는 `docs/A3/`에 둔다. 모델 생성과 QAT는 `A3/model.py`, `A3/quantization.py`에서 관리하고 checkpoint I/O는 `utils`에서 가져온다. A3 전용 pruning과 지표는 `A3/pruning/`, `A3/metrics.py`에서 관리한다. 아래 learned-query 내용은 이전 설계 기록이며 현재 구현은 위 링크를 따른다.
 
 전체 폴더 배치와 독립 관리 규칙은 [실험 폴더 구조](../experiment-folder-structure.md)를 따른다.
 

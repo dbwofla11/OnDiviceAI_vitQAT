@@ -1,21 +1,19 @@
 # Food-101 ViT 실험 1-1 / 1-2
 
-ViT-S/16에서 **다른 담당자의 QAT-only 모델에 추론 Cropr router**를 적용하는 후속 실험은
-[실험 설계 폴더](A3/README.md)에 정리했다.
-논문 파라미터, 실험 조건, 구현 아키텍처를 별도 문서로 관리한다. 추론 경로는 구현했으며,
-[실행 방법과 query 파일 계약](A3/execution.md)을 참고한다. 실제 학습된 query 확보 방식은 미결정이다.
+실험별 진입점은 [폴더 구조와 실험 대응표](experiment-folder-structure.md)를 따른다.
+A1은 FP32, A2는 QAT-only, A3는 QAT checkpoint의 추론 CLS pruning,
+A4는 CLS pruning+QAT, B1은 FP32 Cropr 학습, B2는 Cropr+QAT다.
+B1의 후속 PTQ는 아직 구현하지 않았다. A3 CLS pruning에는 query checkpoint가 필요 없다.
 
-- 1-1: `vit_tiny_patch16_224`, 101 classes, CLS pooling, FP32 scratch 학습.
-- 1-2: 동일 모델과 초기값으로 시작하는 QAT-only scratch 학습. Pruning 없음.
-- 같은 실행 코드에서 Cropr on/off와 QAT on/off를 독립적으로 조합할 수 있다.
-- `pretrained=False`이며 pretrained checkpoint 다운로드/로딩 경로가 없다.
+기본 모델은 `vit_tiny_patch16_224`, 101 classes, CLS pooling이다.
+기본은 scratch이며 새 학습에 `--pretrained`를 주면 해당 실험의 `model.py`가 사전학습 가중치를 불러온다.
 
 저장소 루트에서 Conda 환경을 생성하고 활성화한다.
 
 ```powershell
 conda env create -f environment.yml
 conda activate vitqat
-python -m pytest tests -q
+python -m pytest tests A3/tests A4/tests B2/tests -q
 ```
 
 `environment.yml`과 `requirements.txt`는 Python 3.10, PyTorch 2.3.0+cu121,
@@ -23,14 +21,14 @@ torchvision 0.18.0+cu121, timm 1.0.3, NumPy 1.26.4를 지정한다.
 CUDA 12.1 runtime은 PyTorch wheel에 포함되며 NVIDIA GPU driver가 필요하다.
 [공식 PyTorch 버전별 설치 안내](https://pytorch.org/get-started/previous-versions/)의 조합을 사용한다.
 이미 생성한 환경에서는 `conda activate vitqat`만 실행한다.
-활성화 없이 실행하려면 `conda run --no-capture-output -n vitqat python -m vitqat.train ...`을 사용한다.
+활성화 없이 실행하려면 `conda run --no-capture-output -n vitqat python -m A2.train ...`을 사용한다.
 
 ```powershell
-python -m vitqat.train --mode fp32 --data-root data --download --output runs/1-1_fp32 --device cuda
-python -m vitqat.train --mode qat --weight-bits 2 --activation-bits 2 --data-root data --output runs/1-2_w2a2 --device cuda
-python -m vitqat.train --mode qat --weight-bits 4 --activation-bits 8 --data-root data --output runs/1-2_w4a8 --device cuda
-python -m vitqat.train --mode fp32 --use-cropr --cropr-pruning-rate 8 --data-root data --output runs/cropr_fp32 --device cuda
-python -m vitqat.train --mode qat --use-cropr --weight-bits 2 --activation-bits 2 --data-root data --output runs/cropr_w2a2 --device cuda
+python -m A1.train --mode fp32 --data-root data --download --output runs/1-1_fp32 --device cuda
+python -m A2.train --mode qat --weight-bits 2 --activation-bits 2 --data-root data --output runs/1-2_w2a2 --device cuda
+python -m A2.train --mode qat --weight-bits 4 --activation-bits 8 --data-root data --output runs/1-2_w4a8 --device cuda
+python -m B1.train --mode fp32 --use-cropr --cropr-pruning-rate 8 --data-root data --output runs/cropr_fp32 --device cuda
+python -m B2.train --mode qat --use-cropr --weight-bits 2 --activation-bits 2 --data-root data --output runs/cropr_w2a2 --device cuda
 ```
 
 `--weight-bits`, `--activation-bits`는 독립적으로 2/3/4/8을 지원한다. FP32 mode는 항상 W32A32이다.
@@ -40,52 +38,18 @@ Food-101 파일은 `data/food-101/{images,meta}`에서 읽는다. `--download`�
 표준 timm ViT 아키텍처를 지정할 수 있다. `--experiment`는 결과에 저장할 자유로운 실험명이다.
 생략하면 Cropr off에서는 FP32=`1-1`, QAT=`1-2`, Cropr on에서는 `cropr_fp32`/`cropr_qat`로 기록한다.
 실험명은 모델 동작을 바꾸지 않는다. Cropr FP32 실행에는 PTQ가 포함되지 않는다.
-기존 `python -m experiments.train` 명령은 `python -m vitqat.train`으로 변경되었다.
+기존 `vitqat.train` 명령은 실행 조건에 맞는 실험별 진입점으로 교체한다.
 
-## 실험별 독립 폴더 구조
+## 실험별 폴더와 공통 모듈
 
-새 실험의 코드는 저장소 루트의 `<실험 ID>/`, 문서는 `docs/<실험 ID>/`에 따로 둔다.
-A3는 **`A3/`에 코드·전용 지표·테스트**, **`docs/A3/`에 설계·파라미터·아키텍처·실행 문서**를 관리한다.
-폴더 배치와 재사용 규칙은 [실험 폴더 구조 문서](experiment-folder-structure.md)를 따른다.
+실험 진입점과 전용 로직은 `A1/`~`A4/`, `B1/`, `B2/`에 둔다.
+모델·QAT·loss·optimizer·추론 정책은 각 실험 폴더에 두고, 데이터·checkpoint·반복 실행 같은 기반 기능은 `utils/`에 둔다.
+A3/A4는 각각 자체 `pruning/`을 관리한다. 양자화도 각 QAT 실험의 `quantization.py`에 둔다. TensorRT 엔진 실행은 `utils/tensorrt_benchmark.py`를 사용한다.
+전체 파일 배치와 이전 import 경로는 [실험 폴더 구조](experiment-folder-structure.md)에 정리했다.
 
-```text
-A3/          # A3 실험 코드, tests/, 로컬 checkpoints/ 및 runs/
-docs/A3/     # A3 실험 문서
-vitqat/      # 기존 ViT·QAT 코드, A3가 수정 없이 import
-cropr/       # 기존 Cropr 원본
-tests/       # 기존 공통 회귀 테스트
-```
-
-앞선 실험의 config/checkpoint를 상속하고 A3에서는 추론 pruning만 추가한다.
-새 실험 동작을 기존 ViT 코드에 직접 넣지 않고 해당 실험 폴더의 wrapper·adapter에서 구현한다.
-실행 명령은 [A3 실행 방법](A3/execution.md), 세부 구조는 [A3 아키텍처](A3/architecture.md)를 참고한다.
-
-## 기존 공통 코드의 구성과 재사용
-
-기존 기준선에서 모델 크기·학습 조건·정밀도만 비교할 때는 공통 실행 진입점에 옵션을 전달한다.
-새 알고리즘을 추가하는 독립 실험은 위 폴더 구조를 따른다. 학습 코드를 통째로 복사하지 않고
-필요한 공통 기능을 import해서 사용하며, 실험 결과는 각 실험의 별도 output 경로에 저장한다.
-
-```text
-vitqat/
-  train.py          # 실행 옵션에 따라 구성하고 runner 호출
-  cli.py            # 사용자 옵션
-  models.py         # 모델 선택 및 QAT 적용
-  cropr_adapter.py  # 원본 파일 수정 없이 기존 Cropr 모델 생성/연결
-  quantization.py   # quantizer와 QAT 연산
-  data.py           # Food-101 split, 전처리, loader
-  training.py       # 학습/평가 step, scheduler, checkpoint
-  runner.py         # epoch 반복, best 모델 선택, 결과 저장
-  metrics.py        # 실제 block별 token 수에 따른 ViT/Cropr 지표
-cropr/cls/          # 기존 ViT forward, Cropr scorer/pruning/LLF 구현 재사용
-tests/              # 회귀 및 옵션/확장 검증
-docs/experiments.md # 실행 방법
-```
-
-새 알고리즘은 각 실험 폴더에 구현하고 전용 진입점에서 연결한다.
-공통 `runner.run()`은 `build_model`, `measure_model`을 받고,
-필요하면 `train_epoch_fn`, `evaluate_fn`, `data_factory`도 교체할 수 있어 공통 epoch/checkpoint
-코드를 수정하지 않고 새 모델, 보조 loss, 평가 방식을 연결할 수 있다.
+공통 `utils.runner.run()`은 실험의 `build_model`, `optimizer_factory`, `train_epoch_fn`,
+`evaluate_fn`, `measure_model`을 필수로 받는다. `data_factory`도 교체할 수 있다.
+실험 전용 모델 조합은 각 실험 진입점에서 전달하며 공통 모듈은 실험 폴더를 import하지 않는다.
 
 `cropr/`의 원본 파일은 수정하지 않는다. `cropr_adapter.py`에서 기존
 `cropr.cls.vision_transformer.VisionTransformer`를 생성할 때 원본의 `use_cropr` 설정을 전달한다.
@@ -102,11 +66,11 @@ QAT 전용 CrossAttention subclass는 `quantization.py`에 두며 원본 scorer�
 
 | 옵션 | 기본값 / 의미 |
 |---|---|
-| `--use-cropr` / `--no-use-cropr` | 기본 off. `--mode fp32` 또는 `--mode qat`와 독립 |
+| `--use-cropr` / `--no-use-cropr` | B1/B2에서 on, A1/A2/A4에서 off. 진입점 조건과 다른 값은 거부 |
 | `--cropr-pruning-rate` | 8. 각 Cropr가 제거하는 token 수 |
 | `--cropr-llf` / `--no-cropr-llf` | 기본 off. LLF on이면 마지막 block 앞에서 제거한 token 복원 |
-| `--qat-scope all` | 기본값. ViT 및 Cropr의 Linear, learnable queries, Q/K/V/probability 양자화 |
-| `--qat-scope backbone` | ViT만 QAT 적용, Cropr 모듈은 FP32 |
+| `--qat-scope all` (B2) | 기본값. ViT 및 Cropr의 Linear, learnable queries, Q/K/V/probability 양자화 |
+| `--qat-scope backbone` (B2) | ViT만 QAT 적용, Cropr 모듈은 FP32 |
 | `--aux-loss-weight` | 기본 1.0. 각 Cropr 보조 head loss의 계수 |
 
 기존 Cropr의 schedule을 유지하여 첫 모듈은 `pruning_rate + 1`개를 제거한다.
@@ -124,7 +88,7 @@ Cropr의 query 수와 head 수는 각 1개이며, q/k/v projection은 원본 기
 ## CLS attention token pruning 옵션
 
 학습 모듈 없이 CLS가 각 패치에 주는 attention(head 평균)의 Top-K로 token을 고르는 A3 pruning을
-`vitqat.train`에서 켠다. 위치·제거 개수·LLF는 Cropr 스케줄을 따른다. 상세는 [library-api.md](library-api.md).
+`A4.train`에서 학습·추론 공동 pruning을 사용한다. 위치·제거 개수·LLF는 Cropr 스케줄을 따른다. 상세는 [library-api.md](library-api.md).
 
 | 옵션 | 기본값 / 의미 |
 |---|---|
@@ -138,7 +102,7 @@ pruning 모듈은 학습 파라미터가 없어 같은 seed에서 QAT only와 �
 QAT only 추론 시 pruning 평가(실험 1-c)는 이 옵션이 아니라 `python -m A3.eval_pruning`을 쓴다.
 
 ```powershell
-python -m vitqat.train --mode qat --cls-pruning train_and_inference --model vit_small_patch16_224 --data-root data --output runs/1-d_w2a2 --device cuda --experiment 1-d
+python -m A4.train --mode qat --cls-pruning train_and_inference --model vit_small_patch16_224 --data-root data --output runs/1-d_w2a2 --device cuda --experiment 1-d
 ```
 
 ## 공통 학습 조건
@@ -225,7 +189,7 @@ CUDA 측정은 전후 synchronize를 수행한다. 장치명, 라이브러리 �
 ## 검증
 
 ```powershell
-python -m pytest tests -q
+python -m pytest tests A3/tests A4/tests B2/tests -q
 ```
 
 양자화 level/gradient, observer 고정, 초기값 및 fake quant off 출력 일치,

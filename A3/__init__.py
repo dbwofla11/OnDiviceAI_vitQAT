@@ -1,1 +1,1 @@
-"""A3: inference-only Cropr experiments on an upstream QAT checkpoint."""
+"""A3: paired dense/CLS-pruned inference on an upstream QAT checkpoint."""

@@ -68,9 +68,9 @@ class InferencePrunedViT(nn.Module):
         super().__init__()
         if getattr(backbone, "use_cropr", False) or backbone.num_prefix_tokens != 1:
             raise ValueError("Require a dense backbone with exactly one CLS token")
-        for method in ("forward_embed", "forward_head"):
+        for method in ("patch_embed", "_pos_embed", "patch_drop", "norm_pre", "forward_head"):
             if not callable(getattr(backbone, method, None)):
-                raise ValueError("Backbone must use the repository Cropr adapter forward contract")
+                raise ValueError("Backbone must provide the timm ViT embedding and head contract")
         if any(p.dtype != torch.float32 for p in backbone.parameters()):
             raise ValueError("Inference pruning currently supports FP32/fake-quant FP32 backbones")
         self.config = config or PruningConfig()
@@ -104,7 +104,10 @@ class InferencePrunedViT(nn.Module):
         self.last_trace = None
         if not self.enabled:
             return self.backbone(images)
-        x = self.backbone.forward_embed(images)
+        x = self.backbone.patch_embed(images)
+        x = self.backbone._pos_embed(x)
+        x = self.backbone.patch_drop(x)
+        x = self.backbone.norm_pre(x)
         removed = []
         if self.capture_trace:
             ids = torch.arange(x.shape[1], device=x.device).expand(x.shape[0], -1)

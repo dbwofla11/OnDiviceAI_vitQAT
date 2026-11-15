@@ -6,8 +6,8 @@ import torch
 from torch import nn
 from torch.utils.data import TensorDataset
 
-from vitqat.cli import parser
-from vitqat.runner import run
+from tests.support import parser
+from tests.support import run
 
 
 @pytest.mark.parametrize("failure", [None, "split", "weights"])
@@ -65,12 +65,12 @@ def test_evaluation_restores_config_and_keeps_runtime_options(tmp_path, monkeypa
         effective = json.loads((tmp_path / "eval/config.json").read_text())
         assert effective["mixup"] == 0.8 and effective["batch_size"] == 2
         assert not (tmp_path / "eval/last.pt").exists()
-    assert seen == ["data", "model"]
+    assert seen == (["data"] if failure == "split" else ["data", "model"])
     assert args.mode is None  # Caller arguments are not mutated.
 
 
 def test_training_still_requires_mode(tmp_path):
-    from vitqat.train import main
+    from tests.support import main
     args = parser().parse_args(["--output", str(tmp_path)])
     with pytest.raises(ValueError, match="--mode"):
         main(args)

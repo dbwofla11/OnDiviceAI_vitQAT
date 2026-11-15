@@ -220,3 +220,23 @@ __marimo__/
 # Local experiment datasets and outputs
 /data/
 /runs/
+
+# Per-experiment artifacts
+/A1/data/
+/A1/runs/
+/A1/checkpoints/
+/A2/data/
+/A2/runs/
+/A2/checkpoints/
+/A3/data/
+/A3/runs/
+/A3/checkpoints/
+/A4/data/
+/A4/runs/
+/A4/checkpoints/
+/B1/data/
+/B1/runs/
+/B1/checkpoints/
+/B2/data/
+/B2/runs/
+/B2/checkpoints/

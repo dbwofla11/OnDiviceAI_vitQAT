@@ -10,13 +10,15 @@ import timm
 import torch
 import torchvision
 
-from vitqat.augment import AUGMENT_DEFAULTS
-from vitqat.data import loader, make_data
+from utils.augment import AUGMENT_DEFAULTS
+from utils.data import loader, make_food101_data as make_data
 from .pruning import attach_pruning, PruningConfig
 from .metrics import measure_vit
-from vitqat.models import build_model
-from vitqat.quantization import Quantizer, freeze_observers
-from vitqat.training import evaluate, read_checkpoint, seed_all
+from .model import build_model, restore_model
+from .quantization import Quantizer, freeze_observers, validate_qat_state
+from utils.classification import evaluate
+from utils.checkpoint import read_checkpoint
+from utils.reproducibility import seed_all, configure_backend
 
 
 def sha256_file(path):
@@ -54,10 +56,10 @@ def inherited_args(checkpoint, options):
     missing = required - config.keys()
     if missing:
         raise ValueError(f"Missing inherited config keys: {sorted(missing)}")
-    if config["mode"] != "qat" or config["use_cropr"]:
+    if config["mode"] != "qat" or config["use_cropr"] or config.get("cls_pruning"):
         raise ValueError("Require a QAT-only checkpoint trained without Cropr")
-    if any(config.get(key, False) for key in ("pretrained", "amp", "tf32")):
-        raise ValueError("This repository loader supports scratch, no-AMP/no-TF32 checkpoints only")
+    if any(config.get(key, False) for key in ("amp", "tf32")):
+        raise ValueError("This repository loader supports no-AMP/no-TF32 checkpoints only")
     args = argparse.Namespace(**{**AUGMENT_DEFAULTS, "threads": 0, **config})
     args.device = options.device
     args.output = options.output
@@ -74,23 +76,6 @@ def inherited_args(checkpoint, options):
             or (options.eval_batch_size is not None and options.eval_batch_size < 1)):
         raise ValueError("Invalid evaluation batch size, workers, threads or latency repetitions")
     return args
-
-
-def validate_qat_state(model):
-    quantizers = [m for m in model.modules() if isinstance(m, Quantizer)]
-    if not quantizers:
-        raise ValueError("QAT checkpoint must contain quantizers")
-    for module in quantizers:
-        fq = module.fake_quant
-        observer = fq.activation_post_process
-        if (observer.min_val.numel() == 0 or observer.max_val.numel() == 0
-                or not torch.isfinite(observer.min_val).all()
-                or not torch.isfinite(observer.max_val).all()
-                or not torch.isfinite(fq.scale).all() or not (fq.scale > 0).all()
-                or not fq.fake_quant_enabled.all()):
-            raise ValueError("Require trained/calibrated observers and enabled fake quantization")
-    if any(not torch.isfinite(value).all() for value in model.state_dict().values()):
-        raise ValueError("Non-finite backbone checkpoint state")
 
 
 def state_digest(model):
@@ -111,6 +96,7 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
     backbone_hash = sha256_file(options.checkpoint)
     checkpoint = torch.load(options.checkpoint, map_location="cpu", weights_only=True)
     args = inherited_args(checkpoint, options)
+    configure_backend(deterministic=True, allow_tf32=False)
     seed_all(args.seed)
     if args.threads > 0:
         torch.set_num_threads(args.threads)
@@ -118,8 +104,8 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
     if manifest["sha256"] != checkpoint.get("split_hash"):
         raise ValueError("Checkpoint data split does not match")
     model = model_factory(args).to(args.device)
-    read_checkpoint(options.checkpoint, model, args, manifest["sha256"])
-    validate_qat_state(model)
+    read_checkpoint(options.checkpoint, model, args, manifest["sha256"],
+                    config_defaults={**AUGMENT_DEFAULTS, "pretrained": False}, restore_model=restore_model)
     model.eval()
     freeze_observers(model, True)
     for module in model.modules():
