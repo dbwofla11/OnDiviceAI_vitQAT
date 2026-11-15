@@ -2,9 +2,9 @@
 import pytest
 import torch
 
-from vitqat.cli import parser
-from vitqat.models import build_model
-from vitqat.train import measure_model
+from tests.support import parser
+from tests.support import build_model
+from tests.support import measure_model
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA GPU required")

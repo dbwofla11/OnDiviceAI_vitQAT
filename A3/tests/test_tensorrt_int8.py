@@ -12,7 +12,7 @@ def test_paired_export(tmp_path, monkeypatch):
     ort = pytest.importorskip("onnxruntime")
     from A3 import benchmark_tensorrt_int8 as runner
     from A3.pruning import attach_pruning
-    from vitqat.tensorrt_int8 import convert_tensorrt_int8, export_onnx
+    from A3.tensorrt_int8 import convert_tensorrt_int8, export_onnx
 
     torch.set_num_threads(2)
     torch.manual_seed(42)

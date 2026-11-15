@@ -20,7 +20,7 @@ settings are rejected by the current converter.
 In an environment with CUDA-enabled PyTorch and an NVIDIA GPU:
 
 ```powershell
-python -m pip install -r requirements-tensorrt.txt
+python -m pip install -r requirements.txt
 python -m A3.benchmark_tensorrt_int8 `
   --checkpoint "A2/runs/seed42/best.pt" `
   --output "A3/runs/seed42/tensorrt-int8" `

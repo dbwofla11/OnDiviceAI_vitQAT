@@ -5,9 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from utils.classification import evaluate_fixed_batch, compare_logits
 
-from vitqat.quantization import QATLinear, Quantizer
-from vitqat.tensorrt_int8 import FrozenQDQ, audit_attention_qdq, convert_tensorrt_int8, export_onnx
+from A2.quantization import QATLinear, Quantizer
+from A2.tensorrt_int8 import FrozenQDQ, audit_attention_qdq, convert_tensorrt_int8, export_onnx
 
 
 def test_w2_values_preserved_and_source_untouched():
@@ -43,7 +44,7 @@ def test_reject_uncalibrated_or_wrong_bits():
 
 
 def test_native_result_summary():
-    from scripts.benchmark_tensorrt_int8 import summarize_results
+    from utils.tensorrt_benchmark import summarize_results
 
     logits = torch.tensor([[0.25, 0.75]])
     result = summarize_results([1, 4, 3, 2], logits, logits)
@@ -57,7 +58,7 @@ def test_native_result_summary():
 
 
 def test_native_requires_cuda(monkeypatch):
-    from scripts.benchmark_tensorrt_int8 import require_tensorrt
+    from utils.tensorrt_benchmark import require_tensorrt
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(RuntimeError, match="CUDA-enabled PyTorch"):
@@ -65,7 +66,7 @@ def test_native_requires_cuda(monkeypatch):
 
 
 def test_accuracy_keeps_partial_batch_and_uses_sample_weighted_loss():
-    from scripts.benchmark_tensorrt_int8 import evaluate_fixed_batch
+    from utils.classification import evaluate_fixed_batch
     from torch.utils.data import DataLoader, TensorDataset
 
     logits = torch.tensor([[4., 0.], [0., 4.], [1., 0.], [0., 1.], [3., 0.], [0., 3.], [1., 0.]])
@@ -88,9 +89,9 @@ def test_accuracy_keeps_partial_batch_and_uses_sample_weighted_loss():
 
 
 def test_real_food_loader_and_split_validation(food_fixture):
-    from scripts.benchmark_tensorrt_int8 import evaluation_data
-    from vitqat.cli import parser
-    from vitqat.data import make_data
+    from A2.benchmark_tensorrt_int8 import evaluation_data
+    from tests.support import parser
+    from utils.data import make_food101_data as make_data
 
     config = parser().parse_args(["--mode", "qat", "--output", "unused", "--image-size", "64",
                                  "--data-root", str(food_fixture), "--device", "cpu"])
@@ -109,7 +110,7 @@ def test_real_food_loader_and_split_validation(food_fixture):
 
 
 def test_timing_has_exact_repeat_count(monkeypatch):
-    from scripts.benchmark_tensorrt_int8 import time_forwards
+    from utils.tensorrt_benchmark import time_forwards
 
     launches, measurements = [], []
     event = SimpleNamespace(record=lambda stream: None, synchronize=lambda: None,
@@ -122,12 +123,12 @@ def test_timing_has_exact_repeat_count(monkeypatch):
 
 @pytest.mark.parametrize("eval_batch_size", [1, 4])
 def test_separate_batch_routing_does_not_replace_timing(monkeypatch, tmp_path, eval_batch_size):
-    from scripts import benchmark_tensorrt_int8 as runner
+    from utils import tensorrt_benchmark as runner
 
     calls, exports = [], []
     batches = object()
 
-    def engine(trt, output, name, x, reference, options, data=None, *, measure=True):
+    def engine(trt, output, name, x, reference, options, data=None, *, evaluate_batches, compare_outputs, allow_tf32, measure=True):
         calls.append((name, x.shape[0], data, measure))
         result = dict(storage_engine_bytes=100 * x.shape[0], storage_onnx_bytes=50 * x.shape[0])
         if measure:
@@ -137,9 +138,10 @@ def test_separate_batch_routing_does_not_replace_timing(monkeypatch, tmp_path, e
         return result
 
     monkeypatch.setattr(runner, "benchmark_engine", engine)
-    monkeypatch.setattr(runner, "export_onnx", lambda model, x, path: exports.append(x.shape[0]))
     result = runner.run_backend(None, tmp_path, "w2_int8", None, torch.zeros(1, 3, 8, 8),
-                                torch.zeros(1, 101), SimpleNamespace(eval_batch_size=eval_batch_size), batches)
+                                torch.zeros(1, 101), SimpleNamespace(eval_batch_size=eval_batch_size), batches,
+                                export_model=lambda model, x, path: exports.append(x.shape[0]),
+                                evaluate_batches=evaluate_fixed_batch, compare_outputs=compare_logits, allow_tf32=False)
     assert result["timing_batch_size"] == 1 and result["eval_batch_size"] == eval_batch_size
     assert result["samples"] == 7 and result["gpu_compute_ms_median"] == 1.5
     assert result["storage_engine_bytes"] == 100
@@ -153,7 +155,7 @@ def test_separate_batch_routing_does_not_replace_timing(monkeypatch, tmp_path, e
 
 
 def test_csv_keeps_accuracy_and_timing_separate(tmp_path):
-    from scripts.benchmark_tensorrt_int8 import write_metrics_csv
+    from A2.benchmark_tensorrt_int8 import write_metrics_csv
 
     report = dict(eval_split="test", model_structure=dict(params=100, gflops=0.1, tokens_per_block=[17, 8]),
                   source_qat=dict(top1_acc=80.0, evaluated_samples=101),
@@ -170,8 +172,8 @@ def test_csv_keeps_accuracy_and_timing_separate(tmp_path):
 @pytest.mark.parametrize("quantized", [False, True])
 def test_native_python_execution(tmp_path, quantized, monkeypatch):
     pytest.importorskip("tensorrt")
-    from scripts.benchmark_tensorrt_int8 import run_backend, require_tensorrt
-    from scripts import benchmark_tensorrt_int8 as runner
+    from utils.tensorrt_benchmark import run_backend, require_tensorrt
+    from utils import tensorrt_benchmark as runner
 
     original_time_forwards = runner.time_forwards
     caller_stream = torch.cuda.current_stream()
@@ -203,7 +205,7 @@ def test_native_python_execution(tmp_path, quantized, monkeypatch):
     options = SimpleNamespace(device="cuda", warmup=0, iterations=2, eval_batch_size=4)
     from torch.utils.data import DataLoader, TensorDataset
     batches = DataLoader(TensorDataset(x[:7], reference[:7].argmax(-1)), batch_size=4)
-    result = run_backend(require_tensorrt("cuda"), tmp_path, "native", layer, x[:1], reference[:1], options, batches)
+    result = run_backend(require_tensorrt("cuda"), tmp_path, "native", layer, x[:1], reference[:1], options, batches, export_model=export_onnx, evaluate_batches=evaluate_fixed_batch, compare_outputs=compare_logits, allow_tf32=False)
     assert torch.cuda.current_stream() == caller_stream
     assert len(measured_streams) == 1
     assert result["cuda_stream"] == "dedicated_non_default"
@@ -225,13 +227,19 @@ def test_native_python_execution(tmp_path, quantized, monkeypatch):
 def test_full_export_and_onnx_runtime(tmp_path, cropr, llf, scope):
     pytest.importorskip("onnx")
     ort = pytest.importorskip("onnxruntime")
-    from vitqat.cli import parser
-    from vitqat.models import build_model
+    from tests.support import parser
+    from tests.support import build_model
 
     torch.set_num_threads(2)
     torch.manual_seed(42)
     args = parser().parse_args(["--mode", "qat", "--activation-bits", "8", "--image-size", "64", "--output", "unused"])
     args.use_cropr, args.cropr_llf, args.qat_scope, args.cropr_pruning_rate = cropr, llf, scope, 1
+    if cropr:
+        from B2.quantization import Quantizer
+        from B2.tensorrt_int8 import FrozenQDQ, convert_tensorrt_int8, export_onnx, audit_attention_qdq
+    else:
+        from A2.quantization import Quantizer
+        from A2.tensorrt_int8 import FrozenQDQ, convert_tensorrt_int8, export_onnx, audit_attention_qdq
     source = build_model(args)
     x = torch.randn(1, 3, 64, 64)
     with torch.no_grad():
@@ -265,7 +273,7 @@ def test_full_export_and_onnx_runtime(tmp_path, cropr, llf, scope):
     torch.testing.assert_close(result, expected, atol=float(converted.head.output_quant.scale) * 8, rtol=0)
     assert (result - expected).norm() / expected.norm().clamp_min(1e-6) < 0.05
     if not cropr:
-        from scripts.benchmark_tensorrt_int8 import main
+        from A2.benchmark_tensorrt_int8 import main
 
         checkpoint = tmp_path / "checkpoint.pt"
         torch.save({"model": source.state_dict(), "config": vars(args)}, checkpoint)

@@ -1,19 +1,34 @@
 """Compare dense A2 and A3 CLS pruning in TensorRT, using one W2A8 checkpoint."""
 import argparse
+import copy
 import csv
 import json
 from pathlib import Path
 
 import torch
 
-from A3.eval_pruning import inherited_args, sha256_file, validate_qat_state
-from A3.metrics import measure_vit
-from A3.pruning import attach_pruning
-from scripts.benchmark_tensorrt_int8 import evaluation_data, require_tensorrt, run_backend
-from vitqat.models import build_model
-from vitqat.quantization import Quantizer
-from vitqat.tensorrt_int8 import audit_attention_qdq, convert_tensorrt_int8, export_onnx
-from vitqat.training import evaluate, seed_all
+from .eval_pruning import inherited_args, sha256_file
+from .metrics import measure_vit
+from .pruning import attach_pruning
+from utils.tensorrt_benchmark import require_tensorrt, run_backend
+from utils.data import make_food101_data as make_data, loader
+from .model import restore_model, build_model
+from .quantization import Quantizer
+from .tensorrt_int8 import audit_attention_qdq, convert_tensorrt_int8, export_onnx
+from utils.classification import evaluate, evaluate_fixed_batch, compare_logits
+from utils.reproducibility import seed_all, configure_backend
+
+
+def evaluation_data(config, checkpoint, options):
+    config = copy.copy(config)
+    config.data_root, config.download = options.data_root, options.download
+    config.batch_size, config.workers, config.device = options.eval_batch_size, options.workers, options.device
+    _, val, test, manifest = make_data(config)
+    if checkpoint.get("split_hash") != manifest["sha256"]:
+        raise ValueError("Checkpoint data split does not match; use the original Food-101 data and split")
+    dataset = test if options.eval_split == "test" else val
+    return loader(dataset, config), manifest
+
 
 
 def main(argv=None):
@@ -44,10 +59,10 @@ def main(argv=None):
     trt = None if options.export_only else require_tensorrt(options.device)
     options.data_root = options.data_root or config.data_root
     batches, manifest = (None, None) if options.export_only else evaluation_data(config, checkpoint, options)
+    configure_backend(deterministic=True, allow_tf32=False)
     seed_all(config.seed)
     source = build_model(config).cpu().eval()
-    source.load_state_dict(checkpoint["model"], strict=True)
-    validate_qat_state(source)
+    restore_model(source, checkpoint)
     for module in source.modules():
         if isinstance(module, Quantizer):
             module.frozen = True
@@ -108,7 +123,8 @@ def main(argv=None):
                 original.cpu()
                 with torch.cuda.device(options.device):
                     torch.cuda.empty_cache()
-                row.update(run_backend(trt, output, name, converted, x, reference, options, batches))
+                row.update(run_backend(trt, output, name, converted, x, reference, options, batches, export_model=export_onnx,
+                                          evaluate_batches=evaluate_fixed_batch, compare_outputs=compare_logits, allow_tf32=False))
                 if row["evaluated_samples"] != len(batches.dataset):
                     raise RuntimeError("Incomplete accuracy evaluation")
                 row["conversion_top1_drop_pp"] = row["source_qat_top1_acc"] - row["top1_acc"]

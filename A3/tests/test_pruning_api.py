@@ -94,7 +94,7 @@ def test_errors_and_soft_target_loss(tmp_path):
 
 
 def test_qat_train_api_optimizer_and_eval_state(tmp_path):
-    from vitqat.quantization import Quantizer
+    from A3.quantization import Quantizer
     from A3.eval_pruning import state_digest
     backbone = small_fixture_model(settings(tmp_path, "qat"))
     model = attach_pruning(backbone, apply_during="cropr_train_and_inference")

@@ -7,13 +7,17 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from vitqat.data import make_data, stratified_split
-from vitqat.metrics import measure_dense_vit as measure
-from vitqat.models import build_model
-from vitqat.train import main, parser
-from vitqat.quantization import Quantizer, QATLinear, freeze_observers
-from vitqat.training import (evaluate, learning_rate, read_checkpoint,
-                               save_checkpoint, seed_all, train_epoch)
+from utils.data import make_food101_data as make_data, stratified_split
+from tests.support import measure_vit as measure
+from tests.support import build_model
+from tests.support import main, parser
+from A2.quantization import Quantizer, QATLinear, freeze_observers
+from utils.classification import evaluate
+from A2.train import learning_rate
+from tests.support import read_checkpoint
+from utils.checkpoint import save_checkpoint
+from utils.reproducibility import seed_all
+from tests.support import train_epoch
 
 
 @pytest.fixture(autouse=True)
@@ -152,7 +156,7 @@ def test_checkpoint_resumes_identical_training(tmp_path, mode):
     other = build_model(args)
     other_optimizer = torch.optim.AdamW(other.parameters(), lr=args.lr)
     checkpoint = read_checkpoint(path, other, args, "split", other_optimizer)
-    assert checkpoint["epoch"] == 0 and checkpoint["best_acc"] == 12.0
+    assert checkpoint["epoch"] == 0 and checkpoint["best_score"] == 12.0
     train_epoch(other, batches, other_optimizer, args, 1, 2)
     assert all(torch.equal(value, other.state_dict()[key]) for key, value in expected.items())
     with pytest.raises(ValueError, match="split"):

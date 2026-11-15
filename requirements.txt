@@ -3,6 +3,13 @@
 torch==2.3.0+cu121
 torchvision==0.18.0+cu121
 timm==1.0.3
+# timm 1.0.3 imports Hub APIs removed in huggingface_hub 2.x.
+huggingface_hub==0.36.2
 numpy==1.26.4
 Pillow==10.4.0
 pytest==8.3.5
+
+# CUDA 12 TensorRT Python bindings and runtime; no SDK or trtexec required.
+tensorrt-cu12==10.13.3.9
+onnx==1.17.0
+onnxruntime==1.20.1

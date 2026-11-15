@@ -1,5 +1,9 @@
 # W2 가중치를 유지하는 TensorRT INT8 실행
 
+QAT 자체는 W/A 각각 2·3·4·8bit를 지원한다. 이 문서의 TensorRT 변환 경로만 W2A8로 제한된다.
+A2/A3/B2는 각각 자기 폴더의 `quantization.py`, `tensorrt_int8.py`를 사용한다.
+Cropr+QAT export는 `python -m B2.benchmark_tensorrt_int8`로 실행한다.
+
 기존 W2A8 QAT 체크포인트를 TensorRT용 explicit INT8 Q/DQ ONNX로 내보낸다.
 Linear/Conv뿐 아니라 backbone attention의 Q/K/V, softmax 확률에도 INT8 Q/DQ를 넣는다.
 TensorRT가 실제로 선택한 커널은 엔진의 레이어 보고서로 별도 확인해야 한다.
@@ -42,7 +46,7 @@ TensorRT Python bindings와 CUDA 12용 runtime도 함께 설치된다.
 `trtexec`, 별도 SDK 다운로드, 실행 파일 경로 설정은 필요 없다.
 
 ```bash
-python -m pip install -r requirements-tensorrt.txt
+python -m pip install -r requirements.txt
 python -m pytest tests/test_tensorrt_int8.py -q
 ```
 
@@ -56,7 +60,7 @@ CPU에서 export만 할 경우에는 `python -m pip install onnx==1.17.0 onnxrun
 ## CPU에서 ONNX 내보내기
 
 ```bash
-python -m scripts.benchmark_tensorrt_int8 \
+python -m A2.benchmark_tensorrt_int8 \
   --checkpoint runs/w2a8/best.pt \
   --output runs/tensorrt_int8 --batch-size 1 --export-only
 ```
@@ -69,7 +73,7 @@ python -m scripts.benchmark_tensorrt_int8 \
 ## GPU에서 엔진 생성과 속도 비교
 
 ```bash
-python -m scripts.benchmark_tensorrt_int8 \
+python -m A2.benchmark_tensorrt_int8 \
   --checkpoint runs/w2a8/best.pt \
   --output runs/tensorrt_int8 --batch-size 1 \
   --warmup 20 --iterations 100
@@ -111,7 +115,7 @@ INT8 행렬곱을 입증할 수 없다. FP32 fallback 또는 정밀도가 불명
 TensorRT INT8의 실제 Top-1 accuracy와 loss를 함께 측정한다.
 
 ```bash
-python -m scripts.benchmark_tensorrt_int8 \
+python -m A2.benchmark_tensorrt_int8 \
   --checkpoint runs/w2a8/best.pt \
   --output runs/tensorrt_int8_eval \
   --data-root data --eval-split test \

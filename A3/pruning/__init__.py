@@ -1,4 +1,4 @@
-"""Reusable Cropr API. No datasets, CLI parsing or checkpoint I/O on import."""
+"""A3-owned CLS/Cropr pruning API."""
 from .inference import InferencePrunedViT, PruningConfig, AttentionRouter
 from .model import PrunedOutput, attach_pruning
 

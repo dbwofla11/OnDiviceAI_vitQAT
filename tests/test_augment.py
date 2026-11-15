@@ -1,4 +1,4 @@
-"""vitqat/augment.py 단위 테스트.
+"""utils/augment.py 단위 테스트.
 
 확인하는 것:
 1. 옵션을 안 주면 기존 동작과 똑같다 (증강이 "선택형"이라는 약속).
@@ -19,10 +19,14 @@ from torchvision import transforms
 
 from timm.loss import SoftTargetCrossEntropy
 
-from vitqat.augment import NUM_CLASSES, augment_batch, build_mixup, build_train_transform
-from vitqat.cli import parser
-from vitqat.data import loader, make_data
-from vitqat.training import read_checkpoint, save_checkpoint, seed_all, train_epoch
+from utils.constants import NUM_CLASSES
+from utils.augment import augment_batch, build_mixup, build_train_transform
+from tests.support import parser
+from utils.data import loader, make_food101_data as make_data
+from tests.support import read_checkpoint
+from utils.checkpoint import save_checkpoint
+from utils.reproducibility import seed_all
+from tests.support import train_epoch
 
 AUGMENT_KEYS = ["mixup", "cutmix", "random_erasing", "crop_min_scale"]
 
@@ -39,7 +43,7 @@ def fixed_seed():
 
 def test_everything_off_is_a_noop():
     """옵션이 모두 꺼져 있으면 Mixup 객체도 없고, 입력과 target이 그대로 돌아온다."""
-    assert build_mixup(0.0, 0.0, SMOOTHING) is None
+    assert build_mixup(0.0, 0.0, SMOOTHING, num_classes=101) is None
     images, target = torch.randn(4, 3, 8, 8), torch.tensor([0, 1, 2, 3])
     out_images, out_target = augment_batch(None, images, target, SMOOTHING)
     assert out_images is images and out_target is target
@@ -72,7 +76,7 @@ def test_random_erasing_changes_pixels():
 
 @pytest.mark.parametrize("mixup,cutmix", [(0.8, 0.0), (0.0, 1.0), (0.8, 1.0)])
 def test_soft_target_rows_sum_to_one(mixup, cutmix):
-    mixup_fn = build_mixup(mixup, cutmix, SMOOTHING)
+    mixup_fn = build_mixup(mixup, cutmix, SMOOTHING, num_classes=101)
     images, target = torch.randn(8, 3, 16, 16), torch.randint(0, NUM_CLASSES, (8,))
     out_images, soft = augment_batch(mixup_fn, images.clone(), target, SMOOTHING)
     assert out_images.shape == images.shape
@@ -83,7 +87,7 @@ def test_soft_target_rows_sum_to_one(mixup, cutmix):
 
 def test_odd_batch_is_not_mixed_but_still_soft():
     """홀수 배치: 이미지는 그대로, target은 label smoothing만 적용된 soft target."""
-    mixup_fn = build_mixup(0.8, 1.0, SMOOTHING)
+    mixup_fn = build_mixup(0.8, 1.0, SMOOTHING, num_classes=101)
     images, target = torch.randn(5, 3, 16, 16), torch.randint(0, NUM_CLASSES, (5,))
     out_images, soft = augment_batch(mixup_fn, images.clone(), target, SMOOTHING)
     assert torch.equal(out_images, images)
@@ -94,7 +98,7 @@ def test_odd_batch_is_not_mixed_but_still_soft():
 def test_soft_loss_equals_cross_entropy_when_not_mixed():
     """섞지 않은 경우(홀수 배치) soft 손실 값이 기존 label-smoothing CrossEntropy와 같아야 한다.
     이 둘이 어긋나면 증강을 켠 실험과 끈 실험의 loss를 비교할 수 없게 된다."""
-    mixup_fn = build_mixup(0.8, 0.0, SMOOTHING)
+    mixup_fn = build_mixup(0.8, 0.0, SMOOTHING, num_classes=101)
     logits, target = torch.randn(5, NUM_CLASSES), torch.randint(0, NUM_CLASSES, (5,))
     _, soft = augment_batch(mixup_fn, torch.randn(5, 3, 8, 8), target, SMOOTHING)
     expected = nn.CrossEntropyLoss(label_smoothing=SMOOTHING)(logits, target)
@@ -208,7 +212,7 @@ def test_make_data_applies_augment_to_train_only_even_with_workers(food_fixture)
 def test_invalid_augment_option_is_rejected_with_field_name(tmp_path, field, value):
     """잘못된 값은 학습 시작 전에, 어떤 옵션이 문제인지 알 수 있는 메시지로 거부해야 한다.
     run()을 거쳐 검증이 실제로 연결돼 있는지도 함께 확인한다 (검증은 run() 맨 앞에서 일어난다)."""
-    from vitqat.runner import run
+    from tests.support import run
     args = small_args(tmp_path, **{field: value})
     with pytest.raises(ValueError, match=field.replace("_", "-")):
         run(args, build_model=None, measure_model=None)

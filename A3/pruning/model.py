@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from vitqat.cropr_adapter import Cropr
 from .inference import InferencePrunedViT, PruningConfig
 
 
@@ -64,6 +63,9 @@ class TrainablePruner(nn.Module):
     """
 
     def __init__(self, backbone, config, queries=None):
+        # Legacy learned-query API only; CLS experiment paths do not import Cropr.
+        from cropr.cls.cropr import Cropr
+
         super().__init__()
         # Reuse the validation without random fallback in the inference API.
         rates = config.schedule(len(backbone.blocks), backbone.patch_embed.num_patches)
@@ -73,8 +75,6 @@ class TrainablePruner(nn.Module):
                 raise ValueError("Invalid Cropr query mapping or dimension")
         if getattr(backbone, "use_cropr", False) or backbone.num_prefix_tokens != 1:
             raise ValueError("Require a dense backbone with one CLS token")
-        if not callable(getattr(backbone, "forward_embed", None)):
-            raise ValueError("Backbone must use the repository Cropr adapter forward contract")
         if any(p.dtype != torch.float32 for p in backbone.parameters()):
             raise ValueError("Require FP32/fake-quant FP32 backbone")
         self.backbone, self.config = backbone, config
@@ -106,7 +106,10 @@ class TrainablePruner(nn.Module):
         if not self.enabled:
             logits = self.backbone(images)
             return PrunedOutput(logits, ()) if self.training else logits
-        x = self.backbone.forward_embed(images)
+        x = self.backbone.patch_embed(images)
+        x = self.backbone._pos_embed(x)
+        x = self.backbone.patch_drop(x)
+        x = self.backbone.norm_pre(x)
         dropped, predictions = [], []
         for i, block in enumerate(self.blocks):
             if i == len(self.blocks) - 1:

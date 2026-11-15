@@ -2,12 +2,12 @@ import pytest
 import torch
 from timm.models.vision_transformer import VisionTransformer
 
-from vitqat.cli import parser
-from vitqat.cropr_adapter import adapt_model, CrossAttention
+from tests.support import parser
+from B2.cropr_adapter import adapt_model, CrossAttention
 from A3.inference_pruning import InferencePrunedViT, PruningConfig, AttentionRouter
 from A3.metrics import measure_vit
-from vitqat.models import build_model
-from vitqat.quantization import prepare_qat
+from A3.model import build_model
+from A3.quantization import prepare_qat
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +27,8 @@ def small_fixture_model(args):
     """Real 12-block adapter/QAT contract, narrow width for fast CPU tests."""
     base = VisionTransformer(img_size=args.image_size, patch_size=16, num_classes=101,
                              embed_dim=12, depth=12, num_heads=3, drop_path_rate=args.drop_path)
-    model = adapt_model(base, args)
+    model = adapt_model(base, use_cropr=args.use_cropr, pruning_rate=args.cropr_pruning_rate,
+                        llf=args.cropr_llf, image_size=args.image_size, drop_path=args.drop_path)
     if args.mode == "qat":
         prepare_qat(model, args.weight_bits, args.activation_bits, args.qat_scope)
     return model

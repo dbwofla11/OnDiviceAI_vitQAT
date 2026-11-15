@@ -1,9 +1,9 @@
 import pytest
 import torch
 
-from vitqat.cli import parser
-from vitqat.models import build_model
-from vitqat.train import main
+from tests.support import parser
+from tests.support import build_model
+from tests.support import main
 
 
 @pytest.mark.parametrize("mode,weight_bits,activation_bits", [("fp32", 2, 2), ("qat", 2, 2), ("qat", 4, 8)])
