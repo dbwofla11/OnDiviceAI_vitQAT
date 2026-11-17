@@ -2,8 +2,8 @@
 
 실험별 진입점은 [폴더 구조와 실험 대응표](experiment-folder-structure.md)를 따른다.
 A1은 FP32, A2는 QAT-only, A3는 QAT checkpoint의 추론 CLS pruning,
-A4는 CLS pruning+QAT, B1은 FP32 Cropr 학습, B2는 Cropr+QAT다.
-B1의 후속 PTQ는 아직 구현하지 않았다. A3 CLS pruning에는 query checkpoint가 필요 없다.
+A4는 CLS pruning+QAT, B1은 Cropr+Linear QAT(LSQ/LSQ+), B2는 Cropr+QAT다.
+A3 CLS pruning에는 query checkpoint가 필요 없다.
 
 기본 모델은 `vit_tiny_patch16_224`, 101 classes, CLS pooling이다.
 기본은 scratch이며 새 학습에 `--pretrained`를 주면 해당 실험의 `model.py`가 사전학습 가중치를 불러온다.
@@ -13,7 +13,7 @@ B1의 후속 PTQ는 아직 구현하지 않았다. A3 CLS pruning에는 query ch
 ```powershell
 conda env create -f environment.yml
 conda activate vitqat
-python -m pytest tests A3/tests A4/tests B2/tests -q
+python -m pytest tests A3/tests A4/tests B1/tests B2/tests -q
 ```
 
 `environment.yml`과 `requirements.txt`는 Python 3.10, PyTorch 2.3.0+cu121,
@@ -27,7 +27,7 @@ CUDA 12.1 runtime은 PyTorch wheel에 포함되며 NVIDIA GPU driver가 필요�
 python -m A1.train --mode fp32 --data-root data --download --output runs/1-1_fp32 --device cuda
 python -m A2.train --mode qat --weight-bits 2 --activation-bits 2 --data-root data --output runs/1-2_w2a2 --device cuda
 python -m A2.train --mode qat --weight-bits 4 --activation-bits 8 --data-root data --output runs/1-2_w4a8 --device cuda
-python -m B1.train --mode fp32 --use-cropr --cropr-pruning-rate 8 --data-root data --output runs/cropr_fp32 --device cuda
+python -m B1.train --cropr-pruning-rate 8 --weight-bits 2 --activation-bits 2 --data-root data --output runs/cropr_linear_qat_w2a2 --device cuda
 python -m B2.train --mode qat --use-cropr --weight-bits 2 --activation-bits 2 --data-root data --output runs/cropr_w2a2 --device cuda
 ```
 
@@ -36,15 +36,15 @@ Food-101 파일은 `data/food-101/{images,meta}`에서 읽는다. `--download`�
 
 `--model vit_tiny_patch16_224`가 기본 모델이며, `--model vit_small_patch16_224`처럼
 표준 timm ViT 아키텍처를 지정할 수 있다. `--experiment`는 결과에 저장할 자유로운 실험명이다.
-생략하면 Cropr off에서는 FP32=`1-1`, QAT=`1-2`, Cropr on에서는 `cropr_fp32`/`cropr_qat`로 기록한다.
-실험명은 모델 동작을 바꾸지 않는다. Cropr FP32 실행에는 PTQ가 포함되지 않는다.
+생략하면 Cropr off에서는 FP32=`1-1`, QAT=`1-2`, Cropr on에서는 B1=`cropr_linear_qat`, B2=`cropr_qat`로 기록한다.
+실험명은 모델 동작을 바꾸지 않는다.
 기존 `vitqat.train` 명령은 실행 조건에 맞는 실험별 진입점으로 교체한다.
 
 ## 실험별 폴더와 공통 모듈
 
 실험 진입점과 전용 로직은 `A1/`~`A4/`, `B1/`, `B2/`에 둔다.
 모델·QAT·loss·optimizer·추론 정책은 각 실험 폴더에 두고, 데이터·checkpoint·반복 실행 같은 기반 기능은 `utils/`에 둔다.
-A3/A4는 각각 자체 `pruning/`을 관리한다. 양자화도 각 QAT 실험의 `quantization.py`에 둔다. TensorRT 엔진 실행은 `utils/tensorrt_benchmark.py`를 사용한다.
+A3/A4는 각각 자체 `pruning/`을 관리한다. 양자화도 각 QAT 실험의 `quantization.py`(B1은 `quantizers.py`, `modules.py`)에 둔다.
 전체 파일 배치와 이전 import 경로는 [실험 폴더 구조](experiment-folder-structure.md)에 정리했다.
 
 공통 `utils.runner.run()`은 실험의 `build_model`, `optimizer_factory`, `train_epoch_fn`,
@@ -56,7 +56,7 @@ A3/A4는 각각 자체 `pruning/`을 관리한다. 양자화도 각 QAT 실험�
 timm에서 만든 scratch backbone의 초기 파라미터를 가져와 Cropr on/off의 backbone 초기값을 맞춘다.
 Cropr on/off 모두 원본의 forward/pruning/LLF 경로를 사용하고, 선택된 모델에 QAT를 적용한다.
 원본의 스크립트용 import는 adapter에서 런타임 package alias로 연결한다.
-QAT 전용 CrossAttention subclass는 `quantization.py`에 두며 원본 scorer를 수정하지 않는다.
+QAT 전용 CrossAttention subclass는 `quantization.py`(B1은 `modules.py`)에 두며 원본 scorer를 수정하지 않는다.
 원본 transformer block과 호환되는 표준 ViT 아키텍처(Tiny/Small 등의 MLP ratio 4, qkv bias 사용)를 지원한다.
 `measure_vit()`는 실제 block 입력과 pruner 출력을 관측하여 토큰 수와 연산량을 계산한다.
 기존 공통 기능의 테스트는 `tests/`에 유지한다. 독립 실험의 테스트는 `<실험 ID>/tests/`에 추가한다.
@@ -66,7 +66,7 @@ QAT 전용 CrossAttention subclass는 `quantization.py`에 두며 원본 scorer�
 
 | 옵션 | 기본값 / 의미 |
 |---|---|
-| `--use-cropr` / `--no-use-cropr` | B1/B2에서 on, A1/A2/A4에서 off. 진입점 조건과 다른 값은 거부 |
+| `--use-cropr` / `--no-use-cropr` | B1/B2에서 on, A1/A2/A4에서 off. B1만 `--no-use-cropr`(Linear QAT-only ablation)를 허용하고 다른 진입점은 조건과 다른 값을 거부 |
 | `--cropr-pruning-rate` | 8. 각 Cropr가 제거하는 token 수 |
 | `--cropr-llf` / `--no-cropr-llf` | 기본 off. LLF on이면 마지막 block 앞에서 제거한 token 복원 |
 | `--qat-scope all` (B2) | 기본값. ViT 및 Cropr의 Linear, learnable queries, Q/K/V/probability 양자화 |
@@ -82,7 +82,7 @@ LLF on에서는 10개 모듈이 81개를 제거한 후 마지막 block에 전체
 학습 loss는 `main CE + aux_loss_weight * sum(aux CE)`로 원본의 보조 head 학습을 유지한다.
 Top-k 선택 자체는 미분되지 않으므로 learnable queries의 학습에는 보조 loss가 필요하다.
 평가에서는 원본 `forward_scorer` 경로를 사용하여 보조 head를 실행하지 않는다.
-QAT scope=all에서는 학습/평가 scorer의 query/key quantizer를 공유한다.
+B2의 QAT scope=all과 B1에서는 학습/평가 scorer가 query/key quantizer를 공유한다.
 Cropr의 query 수와 head 수는 각 1개이며, q/k/v projection은 원본 기본값인 Identity를 사용한다.
 
 ## CLS attention token pruning 옵션
@@ -132,7 +132,7 @@ train 68,175 / validation 7,575장으로 분리한다. 공식 test 25,250장은 
 
 ## QAT 정의
 
-PyTorch FakeQuantize의 uniform affine quantization을 사용한다.
+A2/A3/A4/B2는 PyTorch FakeQuantize의 uniform affine(비대칭) quantization을 사용한다.
 `q = clamp(round(x/scale) + zero_point, 0, 2**bits-1)`, `x_hat = (q-zero_point)*scale`.
 학습 가능한 FP32 master weight에 fake quantization을 적용하고 STE로 gradient를 전달한다.
 이는 실제 INT2/INT4 kernel이나 모델 배포 형식의 구현은 아니다.
@@ -150,6 +150,20 @@ Weight observer는 매 학습 forward에서 min/max를 갱신하고, activation 
 `--freeze-observers-epoch N`을 지정하면 0부터 센 N번째 epoch부터 weight/activation observer를 모두 고정한다.
 기본값 -1은 학습 내내 갱신한다. 정밀도와 observer 상태는 checkpoint에 저장된다.
 FP32와 QAT 모두 명시적 attention matmul을 사용한다.
+
+B1은 observer 대신 LSQ 계열의 학습 가능한 step size를 사용하는 Linear QAT다.
+- transformer block의 Linear는 `W{weight-bits}A{activation-bits}`로 양자화한다.
+- patch embedding, classifier head, Cropr scorer는 8bit로 양자화한다.
+- attention QK^T/AV 행렬곱은 FP32로 둔다.
+- weight는 출력 채널별 대칭 LSQ다(`[-2^(b-1), 2^(b-1)-1]`, zero point 0). 초기화는 기본 LSQ+이며, LSQ 또는 StatsQ를 고를 수 있다.
+- activation은 tensor별 LSQ+다(`clamp(round((x-β)/s), 0, 2^b-1)·s+β`, 비대칭, 학습 가능한 offset β). `--activation-quantizer lsq`를 주면 대칭 LSQ를 쓴다.
+- 자세한 내용은 [B1/README.md](../B1/README.md)를 참고한다.
+
+**학습과 추론의 양자화 방식은 모든 QAT 실험에서 같다.**
+- 추론은 학습한 quantizer 객체를 그대로 사용하고 observer만 고정한다. 대칭/비대칭 grid가 바뀌지 않는다.
+- A2/A3/A4/B2는 학습·추론 모두 비대칭(affine)이다. B1은 학습·추론 모두 같은 LSQ/LSQ+ grid를 쓴다.
+- 추론에서 activation을 대칭 INT8로 재매핑하던 TensorRT export 경로는 사용하지 않아 제거했다.
+- `tests/test_quantization_consistency.py`가 보정 후 학습 모드와 추론 모드 forward의 logits가 정확히 같은지 확인한다.
 
 ## 결과와 재개
 
@@ -189,10 +203,10 @@ CUDA 측정은 전후 synchronize를 수행한다. 장치명, 라이브러리 �
 ## 검증
 
 ```powershell
-python -m pytest tests A3/tests A4/tests B2/tests -q
+python -m pytest tests A3/tests A4/tests B1/tests B2/tests -q
 ```
 
-양자화 level/gradient, observer 고정, 초기값 및 fake quant off 출력 일치,
+양자화 level/gradient, observer 고정, 학습/추론 양자화 일치, 초기값 및 fake quant off 출력 일치,
 W2A2/W2A8/W4A4/W4A8 backward, split disjointness, 마지막 accumulation 처리,
 FP32/QAT checkpoint 재개 재현, GFLOPs 공식, 실제 Food101 loader를 통과하는 생성 이미지 fixture의
 학습→검증→저장→최종 평가→재개→재평가 경로를 검증한다.

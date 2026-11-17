@@ -13,6 +13,7 @@ def parser():
 
 
 def evaluate(model, batches, device):
+    # The trained LSQ/LSQ+ quantizers run unchanged: same weight and activation grids as training.
     return evaluate_logits(model, batches, device)
 
 

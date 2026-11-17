@@ -16,11 +16,14 @@ def experiment(args):
     if getattr(args, "cls_pruning", None):
         return "A4"
     if args.use_cropr:
-        return "B2" if args.mode == "qat" else "B1"
+        return "B2"  # FP32 Cropr is B2's backbone before QAT (see build_model).
     return "A2" if args.mode == "qat" else "A1"
 
 
 def build_model(args):
+    if args.use_cropr and args.mode == "fp32" and not getattr(args, "cls_pruning", None):
+        # B1 became Cropr + Linear QAT, so the FP32 Cropr reference is B2's model before QAT.
+        return importlib.import_module("B2.model").build_backbone(args)
     return importlib.import_module(experiment(args) + ".model").build_model(args)
 
 

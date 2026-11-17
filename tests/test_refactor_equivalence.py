@@ -44,7 +44,8 @@ def old_state(state):
     return {key: value for key, value in state.items() if not key.endswith("._bit_width")}
 
 
-@pytest.mark.parametrize("name", ["A1", "A2", "A4", "B1", "B2"])
+# B1 is now Cropr + Linear QAT (LSQ), which has no pre-refactor counterpart in this tree.
+@pytest.mark.parametrize("name", ["A1", "A2", "A4", "B2"])
 @pytest.mark.parametrize("align_rng", [False, True], ids=["same-seed", "same-training-rng"])
 def test_before_after_training(original_tree, tmp_path, name, align_rng):
     flags = ["--align-training-rng"] if align_rng else []

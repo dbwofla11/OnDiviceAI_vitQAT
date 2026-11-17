@@ -22,7 +22,7 @@ class BlockDomainImports(importlib.abc.MetaPathFinder):
             raise AssertionError("Unexpected dependency: " + fullname)
 sys.meta_path.insert(0, BlockDomainImports())
 for name in ("runner", "evaluation", "checkpoint", "results", "reproducibility", "optim",
-             "cli", "metrics", "classification", "tensorrt_benchmark"):
+             "cli", "metrics", "classification"):
     importlib.import_module("utils." + name)
 '''
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True,
@@ -120,28 +120,3 @@ def test_legacy_best_accuracy_checkpoint_remains_readable(tmp_path):
     checkpoint = read_checkpoint(path, model, SimpleNamespace(), "legacy")
     assert checkpoint["best_score"] == 73.0
     assert "best_score" not in torch.load(path, weights_only=True)
-
-
-def test_tensor_rt_batch_routing_accepts_regression_metrics(monkeypatch, tmp_path):
-    from utils import tensorrt_benchmark as runner
-
-    evaluate_batches = lambda predict, batches, size: {"rmse": 0.25}
-    compare_outputs = lambda actual, reference: {"max_error": 0.0}
-
-    def engine(trt, output, name, x, reference, options, batches=None, *, measure=True, **callbacks):
-        assert callbacks == dict(evaluate_batches=evaluate_batches,
-                                 compare_outputs=compare_outputs, allow_tf32=True)
-        result = dict(storage_engine_bytes=100, storage_onnx_bytes=50)
-        if measure:
-            result["gpu_compute_ms_median"] = 2.0
-        if batches is not None:
-            result.update(callbacks["evaluate_batches"](None, batches, x.shape[0]))
-        return result
-
-    monkeypatch.setattr(runner, "benchmark_engine", engine)
-    result = runner.run_backend(None, tmp_path, "regression", None, torch.zeros(1, 4),
-                                torch.zeros(1, 1), SimpleNamespace(eval_batch_size=2), object(),
-                                export_model=lambda *args: None, evaluate_batches=evaluate_batches,
-                                compare_outputs=compare_outputs, allow_tf32=True)
-    assert result["rmse"] == 0.25 and result["gpu_compute_ms_median"] == 2.0
-    assert "top1_acc" not in result

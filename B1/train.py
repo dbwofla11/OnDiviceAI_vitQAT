@@ -1,4 +1,4 @@
-"""B1 training recipe: model, optimizer, forward/loss and observer policy."""
+"""B1 training recipe: model, optimizer, forward/loss and Linear QAT policy."""
 from utils.data import make_food101_data as make_data, loader
 from utils.reproducibility import configure_backend
 import copy
@@ -17,11 +17,14 @@ from .inference import evaluate
 
 
 def create_optimizer(model, args):
+    # LSQ step sizes and LSQ+ offsets are 1-D, so they fall in the no-weight-decay group.
     return torch.optim.AdamW(weight_decay_groups(model, args.weight_decay), lr=args.lr)
 
 
 def compute_loss(model, images, target, criterion, *, auxiliary_weight):
     outputs = model(images)
+    if isinstance(outputs, torch.Tensor):  # --no-use-cropr returns only the main logits.
+        outputs = [outputs]
     main = criterion(outputs[0], target)
     auxiliary = sum((criterion(pred, target) for pred in outputs[1:]), main.new_zeros(()))
     return main + auxiliary_weight * auxiliary, {"main": main, "aux": auxiliary}
@@ -84,7 +87,7 @@ def main(args):
     args = copy.copy(args)
     validate(args)
     if args.experiment is None:
-        args.experiment = 'cropr_fp32'
+        args.experiment = 'cropr_linear_qat' if args.use_cropr else 'linear_qat'
     return run(args, build_model=build_model, optimizer_factory=create_optimizer,
                train_epoch_fn=train_epoch, evaluate_fn=evaluate,
                measure_model=measure_model, report_results=report_results,

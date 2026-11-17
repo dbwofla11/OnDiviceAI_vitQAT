@@ -96,7 +96,8 @@ def test_experiment_owns_its_quantization_and_bit_widths(name):
 
 def test_no_algorithm_dispatch_or_quantization_implementation_in_utils():
     root = Path(__file__).resolve().parents[1]
-    for removed in ("models.py", "train.py", "training.py", "quantization.py", "tensorrt_int8.py", "pruning_metrics.py"):
+    for removed in ("models.py", "train.py", "training.py", "quantization.py", "tensorrt_int8.py",
+                    "tensorrt_benchmark.py", "pruning_metrics.py"):
         assert not (root / "utils" / removed).exists()
     for path in (root / "utils").rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
