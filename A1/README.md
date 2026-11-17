@@ -1,6 +1,6 @@
 # A1: FP32 dense baseline
 
-Food-101에서 토큰을 제거하지 않는 FP32 ViT 기준선을 학습한다. A2의 양자화 효과와 B1의 learned-query pruning 효과를 비교하는 기준이다. 학습·추론 모두 dense forward를 사용하며 QAT와 pruning은 적용하지 않는다.
+Food-101에서 토큰을 제거하지 않는 FP32 ViT 기준선을 학습한다. A2의 양자화 효과와 B1/B2의 learned-query pruning + QAT 효과를 비교하는 기준이다. A1 checkpoint는 B1의 `--init-checkpoint` FP32 초기값으로도 쓸 수 있다. 학습·추론 모두 dense forward를 사용하며 QAT와 pruning은 적용하지 않는다.
 
 현재 데이터셋은 Food-101(101 classes), 기본 모델은 `vit_tiny_patch16_224`, 입력 크기는 224다.
 비교 실험에서는 모델·초기화(scratch/pretrained)·seed·데이터 split·증강·학습 조건을 맞춘다.

@@ -5,7 +5,9 @@
 현재 데이터셋은 Food-101(101 classes), 기본 모델은 `vit_tiny_patch16_224`, 입력 크기는 224다.
 비교 실험에서는 모델·초기화(scratch/pretrained)·seed·데이터 split·증강·학습 조건을 맞춘다.
 
-QAT는 FP32 연산에 fake quantization을 적용하는 구현이다. 일반 `inference`의 지연시간은 실제 정수 커널 성능을 의미하지 않는다.
+QAT는 FP32 연산에 fake quantization을 적용하는 구현이다. 학습과 `inference`는 같은 quantizer를 사용하므로 양자화 방식이 같다.
+둘 다 비대칭(affine) 양자화이며 weight는 출력 채널별, activation은 tensor별로 `0..2^b-1` 범위와 zero point를 쓴다.
+`inference`의 지연시간은 실제 정수 커널 성능을 의미하지 않는다.
 
 ## 폴더 구조
 
@@ -18,8 +20,6 @@ A2/
   inference.py                # 저장된 checkpoint의 test split 평가
   metrics.py                  # 측정·결과 항목·환경 정보·model_state.pt 저장
   quantization.py             # 로컬 quantizer, QAT 적용·복원 검증, observer
-  tensorrt_int8.py            # W2A8 → INT8 Q/DQ 변환과 ONNX export
-  benchmark_tensorrt_int8.py  # FP32 master / 변환 모델의 TensorRT 비교
   README.md                   # 이 실험의 실행 안내
 ```
 
@@ -96,29 +96,6 @@ python -m A2.inference --eval-checkpoint A2/runs/w2a8/best.pt --data-root data -
 | `--weight-bits`, `--activation-bits` | 각각 `2` | 각각 2·3·4·8bit 지원. 기본 W2A2, 위 예시는 W2A8 |
 | `--freeze-observers-epoch` | `-1` | -1이면 학습 내내 observer 갱신. 1 이상이면 해당 0-based epoch부터 고정 |
 
-## ONNX export와 TensorRT 평가
-
-학습·보정된 **W2A8 checkpoint**만 현재 converter에 입력할 수 있다. 위 학습 예시가 이 조건을 사용한다.
-`--export-only`는 CPU에서 ONNX와 변환 점검 결과를 생성하며, TensorRT 엔진 실행과 실제 데이터 정확도 평가를 생략한다.
-
-```powershell
-python -m A2.benchmark_tensorrt_int8 --checkpoint A2/runs/w2a8/best.pt --output A2/runs/onnx --export-only
-```
-
-다음은 CUDA에서 엔진을 생성하고 실제 test split 정확도와 지연시간을 측정한다.
-
-```powershell
-python -m A2.benchmark_tensorrt_int8 --checkpoint A2/runs/w2a8/best.pt --output A2/runs/tensorrt --device cuda --data-root data --eval-split test --eval-batch-size 32 --workers 4 --warmup 20 --iterations 100
-```
-
-- `--export-only`와 `--data-root`는 함께 쓰지 않는다. Native 실행에서 `--data-root`를 생략하면 실제 데이터 정확도는 평가하지 않는다.
-- Timing batch는 1로 고정된다. `--eval-batch-size`는 정확도 평가용 batch이며 timing batch와 별개다.
-- `fp32_master`는 동일 QAT checkpoint의 FP32 master weights다. 별도로 학습한 A1 baseline이 아니다.
-- W2 값을 INT8 Q/DQ로 표현하고 A8 grid를 재매핑한다. INT2 커널을 실행한다는 의미가 아니며 실제 커널 정밀도는 layer report로 확인한다.
-- export에는 ONNX, native 실행에는 CUDA와 TensorRT 10이 필요하다. 의존성은 루트 `requirements.txt`에서 관리한다.
-
-Export 결과는 `fp32_master.onnx`, `w2_int8.onnx`, `report.json`에 저장한다. Native 실행은 engine·layer/timing 결과와 `metrics.csv`도 생성한다.
-
 ## 출력 파일
 
 | 파일 | 내용 |
@@ -145,8 +122,7 @@ Export 결과는 `fp32_master.onnx`, `w2_int8.onnx`, `report.json`에 저장한�
 ```powershell
 python -m A2.train --help
 python -m A2.inference --help
-python -m A2.benchmark_tensorrt_int8 --help
-python -m pytest tests/test_experiment_entrypoints.py tests/test_tensorrt_int8.py -q
+python -m pytest tests/test_experiment_entrypoints.py tests/test_quantization_consistency.py -q
 ```
 
 [전체 실험 구조와 공통 코드 경계](../docs/experiment-folder-structure.md), [학습 조건·지표 정의](../docs/experiments.md).

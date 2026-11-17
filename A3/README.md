@@ -19,9 +19,7 @@ A3/
   eval_pruning.py             # CLI·설정 상속·dense/pruned 평가·결과 저장
   inference_pruning.py        # 기존 Python import 경로 호환용
   metrics.py                  # 토큰·연산량·QAT 저장 비용·지연시간 측정
-  tensorrt_int8.py            # W2A8 INT8 Q/DQ 변환과 ONNX export
-  benchmark_tensorrt_int8.py  # dense_int8 / a3_int8 export와 native 비교
-  tests/                      # paired 평가·pruning·export 회귀 테스트
+  tests/                      # paired 평가·pruning 회귀 테스트
   README.md                   # 실행 안내
 ```
 
@@ -44,7 +42,8 @@ pruned: 197, 180, 164, 148, 132, 116, 100,  84,  68,  52,  36, 197
 ```
 
 QAT observer는 고정한다. 평가 전후 모델 state와 입력 checkpoint의 hash가 유지되는지도 확인한다.
-일반 추론은 fake quantization을 사용하는 FP32 연산이며, 정수 커널 성능은 별도의 TensorRT 명령으로 측정한다.
+추론은 A2 학습과 같은 비대칭(affine) fake quantization을 그대로 사용하는 FP32 연산이다.
+따라서 지연시간은 정수 커널 성능을 의미하지 않는다.
 
 ## 실행 준비
 
@@ -58,7 +57,7 @@ python -m pip install -r requirements.txt
 A1 FP32, A4 pruning 학습, B2 learned-query Cropr checkpoint는 사용할 수 없다.
 `model_state.pt`만 전달하는 것도 지원하지 않는다.
 
-아직 A2 checkpoint가 없다면 다음과 같이 준비한다. 이 예시는 이후 TensorRT 평가에도 사용할 수 있는 W2A8이다.
+아직 A2 checkpoint가 없다면 다음과 같이 준비한다. 예시는 W2A8이다.
 이미 학습한 A2 checkpoint가 있으면 이 단계를 생략한다.
 
 ```powershell
@@ -78,7 +77,7 @@ python -m A3.inference --checkpoint A2/runs/w2a8/best.pt --data-root data --outp
 
 한 번의 실행으로 Food-101 test split 전체를 두 조건에서 평가한다. `--output`은 새 디렉터리 또는 빈 디렉터리여야 한다.
 학습 시의 모델·입력 크기·bit·seed·split 설정은 checkpoint에서 상속한다.
-일반 paired 평가는 저장된 2·3·4·8bit QAT 설정을 지원하며 W2A8로 제한하지 않는다.
+paired 평가는 저장된 2·3·4·8bit QAT 설정을 지원한다.
 
 `--device cpu`로도 실행할 수 있다. A3에는 `--download`가 없으므로 A2에서 사용한 Food-101 데이터를 미리 준비한다.
 입력 크기나 모델 깊이를 바꾼 checkpoint는 현재 고정 pruning 스케줄로 최소 한 개의 patch token을 남길 수 있어야 한다.
@@ -96,32 +95,9 @@ python -m A3.inference --checkpoint A2/runs/w2a8/best.pt --data-root data --outp
 
 `python -m A3.eval_pruning`도 같은 CLI를 제공한다. 새 실행에는 `A3.inference`를 사용한다.
 
-## ONNX export와 TensorRT 비교
-
-이 경로는 **학습·보정된 A2 W2A8 checkpoint**만 지원한다.
-CPU에서 두 조건의 ONNX를 생성하고 변환 결과를 점검하려면 다음을 실행한다.
-
-```powershell
-python -m A3.benchmark_tensorrt_int8 --checkpoint A2/runs/w2a8/best.pt --output A3/runs/onnx --export-only
-```
-
-`--export-only`는 데이터셋 평가와 TensorRT 실행을 생략한다. ONNX 의존성이 필요하다.
-다음 명령은 CUDA/TensorRT 10에서 두 엔진의 정확도와 지연시간을 비교한다.
-
-```powershell
-python -m A3.benchmark_tensorrt_int8 --checkpoint A2/runs/w2a8/best.pt --data-root data --output A3/runs/tensorrt --device cuda --eval-split test --eval-batch-size 32 --workers 4 --threads 2 --warmup 20 --iterations 100
-```
-
-- `dense_int8`는 pruning 없는 변환 모델, `a3_int8`는 동일 모델에 CLS pruning을 적용한 조건이다.
-- Native 실행은 실제 데이터를 평가한다. `--data-root`를 생략하면 checkpoint의 데이터 경로를 사용한다.
-- Timing batch는 1로 고정되며, `--eval-batch-size`는 정확도 평가용 batch다.
-- `--warmup`, `--iterations`는 TensorRT timing 횟수다. 일반 추론의 `--latency-*`와 옵션 이름이 다르다.
-- W2 값을 INT8 Q/DQ로 표현하고 A8 grid를 재매핑한다. 실제 커널 정밀도는 layer report로 확인한다.
-- 일반 paired 평가와 마찬가지로 output은 새 경로 또는 빈 디렉터리여야 한다.
-
 ## 출력 파일
 
-일반 paired 평가에서는 다음 파일을 생성한다. 학습·재개 checkpoint는 생성하지 않는다.
+paired 평가는 다음 파일을 생성한다. 학습·재개 checkpoint는 생성하지 않는다.
 
 | 파일 | 내용 |
 |---|---|
@@ -130,9 +106,6 @@ python -m A3.benchmark_tensorrt_int8 --checkpoint A2/runs/w2a8/best.pt --data-ro
 | `dense_metrics.json`, `pruned_metrics.json` | 각 조건의 정확도·loss·토큰 수·연산량·지연시간 |
 | `comparison.json` | 정확도 차이, latency/FLOPs 비율, state 유지 여부 |
 | `comparison.csv` | dense/pruned 두 조건의 지표 |
-
-TensorRT 경로는 `dense_int8.onnx`, `a3_int8.onnx`, `report.json`, `metrics.csv`를 생성한다.
-Native 실행 시에는 engine·layer·timing 결과도 저장한다.
 
 ## 모델·추론 확장 위치
 
@@ -144,7 +117,6 @@ Native 실행 시에는 engine·layer·timing 결과도 저장한다.
 
 ```powershell
 python -m A3.inference --help
-python -m A3.benchmark_tensorrt_int8 --help
 python -m pytest A3/tests -q
 ```
 

@@ -9,8 +9,11 @@
 | A2 | QAT-only | QAT checkpoint 평가 | `A2/quantization.py` |
 | A3 | 선행 A2 학습 결과 사용 | 동일 checkpoint의 dense/CLS pruning 비교 | `A3/quantization.py` |
 | A4 | CLS pruning + QAT | 학습 때의 CLS wrapper 복원 | `A4/quantization.py` |
-| B1 | FP32 Cropr | FP32 Cropr 평가 | PTQ 미구현 |
+| B1 | learned-query Cropr + Linear QAT(LSQ/LSQ+) | 보조 head 없이 Cropr 평가 | `B1/quantizers.py`, `B1/modules.py` |
 | B2 | learned-query Cropr + QAT | 보조 head 없이 Cropr 평가 | `B2/quantization.py` |
+
+모든 QAT 실험의 추론은 학습한 quantizer 객체를 그대로 사용한다. 따라서 학습과 추론의 양자화 방식(대칭/비대칭)이 같다.
+A2/A3/A4/B2는 둘 다 비대칭(affine)이고, B1은 둘 다 같은 LSQ/LSQ+ grid를 쓴다.
 
 ## 각 학습 실험의 파일
 
@@ -23,9 +26,12 @@ A1/A2/A4/B1/B2는 다음 구조를 사용한다.
   train.py         # 학습 루프, optimizer, criterion/loss, Mixup, LR, clipping, observer
   inference.py     # checkpoint 평가 진입점, eval/observer 정책
   metrics.py       # 실험별 측정·결과 항목·환경 메타데이터·모델 파일 저장
-  quantization.py  # QAT 실험만: quantizer, QAT 연산, observer, 저장 비용
+  quantization.py  # A2/A4/B2: quantizer, QAT 연산, observer, 저장 비용
+  quantizers.py    # B1: LSQ/LSQ+/StatsQ fake quantizer
+  modules.py       # B1: QuantLinear/QuantConv2d/Cropr scorer 변환과 복원 검증
   cropr_adapter.py # B1/B2: 각 실험이 소유하는 원본 Cropr 모델 조립
   pruning/         # A4: CLS scorer·스케줄·wrapper
+  tests/           # A3/A4/B1/B2: 실험별 테스트
 ```
 
 A3는 `model.py`, `quantization.py`, `pruning/`, `metrics.py`로 선행 모델 복원과
@@ -33,9 +39,11 @@ A3는 `model.py`, `quantization.py`, `pruning/`, `metrics.py`로 선행 모델 �
 A3/A4의 pruning과 A2/A3/A4/B2의 quantization은 현재 수학적으로 같은 구현에서 출발하지만
 파일과 클래스는 실험별로 독립적이다. 한 실험의 변경이 다른 실험으로 자동 전파되지 않는다.
 앞으로 A2의 양자화 표현을 바꾸면 A3의 checkpoint 인수 계약도 명시적으로 검토해야 한다.
+B1의 Linear QAT(LSQ 계열)는 이들과 다른 독립 구현이다.
 
-A2/A3/B2의 `tensorrt_int8.py`와 `benchmark_tensorrt_int8.py`는 각 실험의 export 정책이다.
-QAT는 weight/activation 각각 2·3·4·8bit를 지원하고, 현재 TensorRT 변환은 W2A8만 지원한다.
+QAT는 weight/activation 각각 2·3·4·8bit를 지원한다.
+A2/A3/B2에 있던 TensorRT export 경로는 사용하지 않아 제거했다. 이 경로는 activation을 대칭 INT8로 재매핑해 학습(비대칭)과 달랐다.
+제거한 파일은 `tensorrt_int8.py`, `benchmark_tensorrt_int8.py`, `utils/tensorrt_benchmark.py`다.
 
 ## utils에 남긴 기능
 
@@ -49,7 +57,7 @@ QAT는 weight/activation 각각 2·3·4·8bit를 지원하고, 현재 TensorRT �
 | `constants.py` | 없음 | Food-101의 클래스 수; 모든 모델의 보편적 상수가 아님 |
 | `data.py` | numpy, torch, torchvision, augment/constants | 명시적인 `make_food101_data` recipe 및 split/loader 도구 |
 | `augment.py` | timm Mixup, torchvision | 공통 이미지 증강. `build_mixup`의 `num_classes`는 호출자가 지정 |
-| `classification.py` | torch | 명시적으로 선택하는 CE/Top-1, fixed-batch 분류 평가, logits 비교 |
+| `classification.py` | torch | 명시적으로 선택하는 CE/Top-1 분류 평가 |
 | `checkpoint.py` | torch, reproducibility | PyTorch 상태 I/O, config/split/RNG 호환 검사; 모델 복원은 callback |
 | `reproducibility.py` | numpy, torch | `seed_all`은 RNG만 변경; `configure_backend`는 전달받은 결정성/TF32 설정 적용 |
 | `optim.py` | 외부 import 없음 | 호출자가 선택하는 weight-decay 그룹 분리 |
@@ -57,18 +65,17 @@ QAT는 weight/activation 각각 2·3·4·8bit를 지원하고, 현재 TensorRT �
 | `evaluation.py` | torch, checkpoint/reproducibility | config/state 복원 및 명시적으로 전달받은 데이터·loader·평가·보고 실행 |
 | `results.py` | csv, json, pathlib | 호출자 dict의 JSON/CSV 저장만 수행 |
 | `metrics.py` | torch, 표준 라이브러리 | ViT `blocks/embed_dim` 규약의 연산·토큰 수와 지연시간 측정; 정밀도/packed storage를 판단하지 않음 |
-| `tensorrt_benchmark.py` | torch, 호출 시 TensorRT | TensorRT 10 고정 shape FP32 images/logits I/O 실행; export·평가·출력 비교·TF32 설정은 호출자가 지정 |
 
 `utils/models.py`, `utils/train.py`, `utils/training.py`, `utils/quantization.py`, `utils/pruning/`,
-`utils/pruning_metrics.py`, `utils/tensorrt_int8.py`, `utils/cropr_adapter.py`는 제거했다.
+`utils/pruning_metrics.py`, `utils/tensorrt_int8.py`, `utils/tensorrt_benchmark.py`, `utils/cropr_adapter.py`는 제거했다.
 utils에는 실험 선택표, QAT 클래스 import, optimizer 생성, pretrained=False 고정 정책이 없다.
 실험 구현은 utils를 사용할 수 있지만 utils는 실험을 import할 수 없다.
 `tests/support.py`와 `tests/legacy_config.py`는 이전 다중 실험 회귀 테스트의 입력 어댑터이며
 운영 코드에서 사용하지 않는다.
 
 A1/A2/A3/A4는 timm ViT를 직접 사용한다. CLS pruning도 timm의 embedding/head 규약을
-사용하므로 일반 train/inference/export 경로에서 `cropr`를 import하지 않는다.
-A 계열의 quantization/export 파일에는 learned-query CrossAttention 구현이 없다.
+사용하므로 train/inference 경로에서 `cropr`를 import하지 않는다.
+A 계열의 quantization 파일에는 learned-query CrossAttention 구현이 없다.
 기존 A3/A4 `attach_pruning(..., apply_during="cropr_train_and_inference")` 호환 API만
 명시적으로 호출했을 때 원본 `cropr.cls.cropr`를 지연 import한다. 이 경로는 현재 A 계열 실험에서 사용하지 않는다.
 
@@ -87,13 +94,12 @@ checkpoint 선택도 실험의 `selection_score(validation)`가 결정한다(높
 
 공통 ViT 측정 함수는 raw parameter bytes·FLOPs·token trace·latency를 반환한다.
 `latency_backend`, quantized parameter 수, packed storage 추정과 pruning 비율 정의는
-각 실험의 `metrics.py`가 구성한다. TensorRT의 데이터 선택은 각 benchmark 진입점에서,
-CE/Top-1 평가는 명시적으로 전달한 classification callback에서 수행한다.
+각 실험의 `metrics.py`가 구성한다. CE/Top-1 평가는 명시적으로 전달한 classification callback에서 수행한다.
 
 경계 검증은 `tests/test_utils_boundaries.py`에서 수행한다. timm/torchvision/cropr import를
 차단한 상태의 인프라 import, 3-class Mixup의 홀수/짝수 batch, 낮은 MSE 기준 checkpoint
-선택·재개, 구형 checkpoint 복원, TF32 설정 보존, 분류 지표 없는 backend 결과 전달을 확인한다.
-이는 PyTorch·Food-101·ViT·TensorRT 기능 자체에 대한 의존성이 전혀 없다는 뜻은 아니다.
+선택·재개, 구형 checkpoint 복원, TF32 설정 보존을 확인한다.
+이는 PyTorch·Food-101·ViT 기능 자체에 대한 의존성이 전혀 없다는 뜻은 아니다.
 위 표에 적은 공통 기능의 사용 조건과 backend 지원 범위는 유지한다.
 
 ## 실행
@@ -111,7 +117,7 @@ python -m A2.inference --eval-checkpoint A2/runs/pretrained/best.pt --data-root 
 # A3 paired 평가
 python -m A3.inference --checkpoint A2/runs/pretrained/best.pt --output A3/runs/eval
 
-python -m pytest tests A3/tests A4/tests B2/tests -q
+python -m pytest tests A3/tests A4/tests B1/tests B2/tests -q
 ```
 
 모든 명령은 저장소 루트에서 실행한다. 기존 `train --eval-checkpoint`도 해당 실험의
@@ -131,7 +137,8 @@ python -m pytest tests/test_experiment_reproducibility.py -q
 
 - A1/A2/A4/B1/B2: 64×64 입력, 2 epoch, 같은 seed의 독립 실행을 비교한다.
   DropPath=0.1, Mixup=0.8, batch size=2, gradient accumulation=2로 난수 사용과 마지막 홀수 batch를 포함한다.
-  QAT는 epoch 1부터 observer를 동결하고, pruning 실험은 pruning rate=1을 사용한다.
+  A2/A4/B2는 epoch 1부터 observer를 동결한다. B1의 LSQ는 첫 학습 batch에서 activation 범위를 초기화한다.
+  pruning 실험은 pruning rate=1을 사용한다.
 - 각 학습 실험은 epoch 0 checkpoint 저장 후 의도적으로 중단하고 `last.pt`에서 재개한다.
   연속 학습·반복 학습·재개 학습의 `last.pt`와 `best.pt`에서 모델/observer buffer,
   optimizer, RNG, epoch, 선택 점수, split hash를 정확히 비교한다. epoch 로그도 같아야 한다.
@@ -141,8 +148,8 @@ python -m pytest tests/test_experiment_reproducibility.py -q
   A3는 추론 전용이므로 학습·재개 대상이 아니다.
 
 시간 측정값은 정확 일치 비교에서 제외한다. 이 검증은 Food-101 전체 데이터·기본 300 epoch의
-최종 정확도 재현, 리팩토링 전 코드와의 전체 수치 동등성, GPU/다중 worker 재현성,
-TensorRT 배포 성능을 입증하지 않는다. 실제 pretrained 다운로드/복원 검증도 아래 별도 테스트로 구분한다.
+최종 정확도 재현, 리팩토링 전 코드와의 전체 수치 동등성, GPU/다중 worker 재현성을 입증하지 않는다.
+실제 pretrained 다운로드/복원 검증도 아래 별도 테스트로 구분한다.
 
 ### 리팩토링 전후 직접 비교
 
@@ -158,7 +165,7 @@ python -m pytest tests/test_refactor_equivalence.py -q --tb=short
 
 검증 조건은 CPU, 실제 ViT-Tiny, 입력 3장, 2 epoch, batch=2, accumulation=2,
 DropPath=0.1, Mixup=0.8이다. 학습 QAT는 W2A2이며 두 번째 epoch부터 observer를 동결한다.
-A4/B1/B2 pruning rate는 1이다. 시간 측정이나 출력 파일 형식이 아닌, 초기 가중치,
+A4/B2 pruning rate는 1이다. 시간 측정이나 출력 파일 형식이 아닌, 초기 가중치,
 epoch별 loss·정확도·logits, 최종 모델/observer·optimizer·RNG 상태를 정확 일치로 비교한다.
 추가된 `_bit_width` 메타데이터만 이전 모델 state 비교에서 제외한다.
 A3는 이전 A2 W2A8 checkpoint를 현재 A3에서 복원하여 224×224 dense/pruned logits와 token 경로를 비교한다.
@@ -182,7 +189,14 @@ A1/A2/A4의 초기 가중치는 같지만 모델 생성 직후 Torch RNG 상태�
 이 테스트는 모델 구성·학습 step·평가 연산 비교이며, 이전 CLI/runner 전체 실행이나
 Food-101 전체 학습의 성능 동등성을 보장하지 않는다.
 
-### 전체 의존성 설치 후 검증
+2026-11-17에 B1을 FP32 Cropr에서 Cropr + Linear QAT로 교체했다.
+그래서 위 표의 B1 열은 이전 FP32 Cropr에 대한 기록이며, B1은 이 테스트의 비교 대상에서 제외했다.
+새 B1과 원래 `cropr_linear_qat` 코드의 수치 동등성은 [B1/README.md](../B1/README.md)의 검증 절에 기록했다.
+
+### 전체 의존성 설치 후 검증 (2026-11-15 기록, TensorRT 제거 전)
+
+아래는 TensorRT 경로가 있던 시점의 기록이다.
+2026-11-17에 TensorRT export 코드·테스트와 `tensorrt-cu12`, `onnx`, `onnxruntime` 의존성을 제거했다.
 
 2026-11-15 `vitqat` 가상환경에 `requirements.txt`의 누락 패키지
 `tensorrt-cu12==10.13.3.9`, `onnx==1.17.0`, `onnxruntime==1.20.1` 및 전이 의존성을 설치했다.
@@ -212,23 +226,27 @@ A3 dense/pruned 모델의 실제 엔진 생성·GPU 실행이 포함된다.
 ## 모델 복원 계약
 
 각 실험의 `model.py`가 `build_model(args)`와 `restore_model(model, checkpoint)`를 소유한다.
-일반 추론, 학습 재개, best checkpoint 재평가, TensorRT 변환 준비가 같은 로컬 복원 함수를
-사용한다. utils는 실험의 복원 함수를 호출하며 FP32/QAT 선택이나 quantizer 타입을 알지 못한다.
-TensorRT 변환은 QAT 복원 이후 해당 실험의 export 코드에서 수행한다.
+추론, 학습 재개, best checkpoint 재평가가 같은 로컬 복원 함수를 사용한다.
+utils는 실험의 복원 함수를 호출하며 FP32/QAT 선택이나 quantizer 타입을 알지 못한다.
+복원한 모델은 학습 때의 quantizer를 그대로 사용하므로 추론의 양자화 방식이 학습과 같다.
 
 QAT 복원은 mode, Cropr/CLS 정책, weight/activation bit, QAT scope를 검증한다.
 state의 비트 수가 config와 다르거나 observer가 미보정·비정상 상태이거나 fake quantization이
 비활성화되어 있으면 평가 전에 실패한다. QAT를 이미 적용한 모델에 다시 적용하는 것도 거부한다.
 새 `_bit_width` buffer가 없는 기존 checkpoint는 원본 config에 저장된 비트 수로 복원한다.
 구형 state만으로 비트 수를 알아낼 수는 없으므로 config 없는 QAT checkpoint를 추측해서 읽지 않는다.
+B1은 mode와 CLS 정책을 검증하고 strict 로드한다. 그 뒤 activation quantizer가 학습 batch로 초기화됐는지와
+모든 state가 유한한지 확인한다. bit와 quantizer 종류는 checkpoint config로 모델을 만들 때 정해진다.
 
 ## 확장 위치
 
 - pretrained 가중치·새 backbone·head-only 등은 해당 실험 `model.py`에서 결정한다.
 - 새로운 저장 형식이나 양자화 표현은 해당 실험의 `restore_model`에서 복원한다. 공통 loader에 실험 분기를 추가하지 않는다.
 - optimizer 또는 loss 변경은 해당 실험 `train.py`에서 결정한다. 학습 루프·criterion·Mixup·scheduler·gradient clipping도 해당 실험의 `train_epoch`에 있다.
-- quantizer, bit 정책, observer 동작은 해당 실험 `quantization.py`와 `train.py`에서 변경한다.
-- 추론 전용 변환이나 backend는 해당 실험 `inference.py` 또는 `tensorrt_int8.py`에서 변경한다.
+- quantizer, bit 정책, observer 동작은 해당 실험 `quantization.py`(B1은 `quantizers.py`, `modules.py`)와 `train.py`에서 변경한다.
+- 추론 전용 변환이나 backend는 해당 실험 `inference.py`에서 변경한다.
+  추론은 학습과 같은 양자화 방식을 유지해야 한다. 다른 grid로 바꾸는 변환(예: 대칭 INT8 export)을 추가하면
+  학습 quantizer도 같은 방식으로 맞추고 `tests/test_quantization_consistency.py`를 확장한다.
 
 pretrained 가중치는 timm의 호환 ViT에 대해 지원하며 Food-101 전처리를 사용한다.
 B1/B2는 원본 Cropr adapter 구조(단일 CLS, MLP ratio 4 등)의 제한을 유지한다.

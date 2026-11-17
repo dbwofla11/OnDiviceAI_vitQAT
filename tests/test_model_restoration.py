@@ -107,32 +107,6 @@ def test_inference_rejects_missing_model_metadata_before_data(tmp_path, monkeypa
     assert not (tmp_path / "eval").exists()
 
 
-@pytest.mark.parametrize("name,scope", [("A2", "all"), ("B2", "all"), ("B2", "backbone")])
-def test_local_export_conversion_after_checkpoint_restore(name, scope, monkeypatch):
-    torch.set_num_threads(2)
-    config = importlib.import_module(f"{name}.config")
-    module = importlib.import_module(f"{name}.model")
-    quantization = importlib.import_module(f"{name}.quantization")
-    exporter = importlib.import_module(f"{name}.tensorrt_int8")
-    args = config.parser().parse_args(["--output", "unused", "--image-size", "64", "--activation-bits", "8"])
-    args.cropr_pruning_rate, args.qat_scope = 1, scope
-
-    def factory(name, *, pretrained, **kwargs):
-        return VisionTransformer(embed_dim=12, depth=3, num_heads=3, **kwargs)
-
-    monkeypatch.setattr(module, "create_model", factory)
-    source = module.build_model(args)
-    images = torch.randn(2, 3, 64, 64)
-    source(images)
-    restored = module.build_model(args)
-    module.restore_model(restored, dict(config=vars(args), model=source.state_dict()))
-    converted = exporter.convert_tensorrt_int8(restored)
-    assert not any(isinstance(m, quantization.Quantizer) for m in converted.modules())
-    with torch.no_grad():
-        assert converted(images).shape == (2, 101)
-        assert torch.isfinite(converted(images)).all()
-
-
 def test_a_series_import_and_model_build_do_not_load_cropr():
     # A fresh process catches transitive dependencies hidden by pytest's imports.
     script = '''
@@ -144,8 +118,6 @@ for name in ("A1", "A2", "A3", "A4"):
     config = importlib.import_module(f"{'A2' if name == 'A3' else name}.config")
     model = importlib.import_module(f"{name}.model")
     importlib.import_module(f"{name}.inference")
-    if name in ("A2", "A3"):
-        importlib.import_module(f"{name}.benchmark_tensorrt_int8")
     args = config.parser().parse_args(["--output", "unused"])
     model.build_model(args)
 assert not any(name == "cropr" or name.startswith("cropr.") for name in sys.modules)

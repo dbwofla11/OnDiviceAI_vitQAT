@@ -14,7 +14,7 @@ from utils.evaluation import run as run_evaluation
     ("A1", "fp32", False, None),
     ("A2", "qat", False, None),
     ("A4", "qat", False, "train_and_inference"),
-    ("B1", "fp32", True, None),
+    ("B1", "linear_qat", True, None),
     ("B2", "qat", True, None),
 ])
 def test_training_and_saved_checkpoint_evaluation(tmp_path, monkeypatch, name, mode, cropr, pruning):
@@ -41,7 +41,7 @@ def test_training_and_saved_checkpoint_evaluation(tmp_path, monkeypatch, name, m
     ])
     trained = entry.main(args)
     expected_label = {"A1": "1-1", "A2": "1-2", "A4": "cls_train_and_inference_qat",
-                      "B1": "cropr_fp32", "B2": "cropr_qat"}[name]
+                      "B1": "cropr_linear_qat", "B2": "cropr_qat"}[name]
     assert trained["experiment"] == expected_label
     saved_path = tmp_path / "train/best.pt"
     before = torch.load(saved_path, weights_only=True)
@@ -65,7 +65,7 @@ def test_training_and_saved_checkpoint_evaluation(tmp_path, monkeypatch, name, m
     ("A1", ["--mode", "qat"]),
     ("A2", ["--use-cropr"]),
     ("A4", ["--cls-pruning", "inference"]),
-    ("B1", ["--mode", "qat"]),
+    ("B1", ["--mode", "fp32"]),
     ("B2", ["--no-use-cropr"]),
 ])
 def test_conflicting_experiment_options_fail_before_creating_output(tmp_path, name, options):

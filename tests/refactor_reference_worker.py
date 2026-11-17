@@ -40,11 +40,11 @@ def main():
              "--epochs", "2", "--warmup-epochs", "0", "--drop-path", "0.1", "--mixup", "0.8"]
     if options.version == "before":
         flags += ["--mode", "qat" if qat else "fp32"]
-        if name in {"B1", "B2"}:
+        if name == "B2":
             flags += ["--use-cropr"]
         if name == "A4":
             flags += ["--cls-pruning", "train_and_inference"]
-    if name in {"B1", "B2"}:
+    if name == "B2":
         flags += ["--cropr-pruning-rate", "1"]
     if name == "A4":
         flags += ["--cls-pruning-rate", "1"]

@@ -103,7 +103,8 @@ A4 전용 pruning wrapper까지 복원하므로 A4에서 학습한 checkpoint를
 
 입력 크기·patch 크기·block 수를 바꾸면 제거 가능한 토큰 수도 달라진다. 최소 한 개의 patch token이 남도록 pruning rate를 조정한다.
 
-A4에는 전용 TensorRT export/benchmark 진입점이 없다. 현재 제공하는 실행 경로는 QAT 학습과 PyTorch fake-quant 추론이다.
+실행 경로는 QAT 학습과 PyTorch fake-quant 추론이다. 둘은 같은 quantizer를 사용하므로 양자화 방식이 같다.
+weight·activation 모두 비대칭(affine) 양자화를 쓴다.
 
 ## 출력 파일
 
