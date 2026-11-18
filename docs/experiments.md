@@ -40,6 +40,21 @@ Food-101 파일은 `data/food-101/{images,meta}`에서 읽는다. `--download`�
 실험명은 모델 동작을 바꾸지 않는다.
 기존 `vitqat.train` 명령은 실행 조건에 맞는 실험별 진입점으로 교체한다.
 
+## EVA02 사전학습 모델
+
+회의에서 선택한 모델은 `eva02_base_patch14_448.mim_in22k_ft_in22k_in1k`다.
+Python에서 [공통 로더](../utils/pretrained.py)를 호출한다.
+
+```python
+from utils.pretrained import load_eva02_backbone
+
+model = load_eva02_backbone()
+```
+
+기본값은 448×448 입력과 사전학습 가중치다. timm은 첫 실행 때 가중치를 내려받아 캐시에 저장하고,
+Food-101용 101클래스 분류 헤드를 초기화한다. 같은 구조를 scratch로 초기화하려면
+`load_eva02_backbone(pretrained=False)`를 사용한다. [timm 모델 카드](https://huggingface.co/timm/eva02_base_patch14_448.mim_in22k_ft_in22k_in1k)
+
 ## 실험별 폴더와 공통 모듈
 
 실험 진입점과 전용 로직은 `A1/`~`A4/`, `B1/`, `B2/`에 둔다.
