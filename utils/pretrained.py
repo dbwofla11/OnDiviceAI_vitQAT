@@ -1,16 +1,35 @@
-"""Build the EVA02 Food-101 backbone with optional timm pretrained weights."""
+"""Load a timm backbone with caller-selected pretrained weights."""
+
+from pathlib import Path
 
 from timm import create_model
 
 from .constants import NUM_CLASSES
 
 
-EVA02_MODEL = "eva02_base_patch14_448.mim_in22k_ft_in22k_in1k"
+def load_pretrained_backbone(
+    model_name: str,
+    *,
+    weights: str | None = None,
+    weights_path: str | Path | None = None,
+    pretrained: bool = True,
+    num_classes: int = NUM_CLASSES,
+    **model_kwargs,
+):
+    """Select a timm weights tag or load a compatible local state-dict file."""
+    if not pretrained and (weights is not None or weights_path is not None):
+        raise ValueError("Set pretrained=True when specifying pretrained weights")
 
+    if weights_path is not None:
+        # Use timm's pretrained path so it can adapt the classification head.
+        # The file may be a state dict even if the registry tag uses a custom loader.
+        model_kwargs["pretrained_cfg_overlay"] = {
+            **(model_kwargs.get("pretrained_cfg_overlay") or {}),
+            "source": "",
+            "state_dict": None,
+            "file": str(weights_path),
+            "custom_load": False,
+        }
 
-def load_eva02_backbone(*, pretrained=True, image_size=448, drop_path_rate=0.0):
-    """Keep EVA02's native pooling and initialize a new 101-class classifier."""
-    if image_size <= 0 or image_size % 14:
-        raise ValueError("EVA02 image_size must be positive and divisible by 14")
-    return create_model(EVA02_MODEL, pretrained=pretrained, num_classes=NUM_CLASSES,
-                        img_size=image_size, drop_path_rate=drop_path_rate)
+    return create_model(model_name, pretrained=pretrained, pretrained_cfg=weights,
+                        num_classes=num_classes, **model_kwargs)
