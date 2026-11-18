@@ -40,6 +40,35 @@ Food-101 파일은 `data/food-101/{images,meta}`에서 읽는다. `--download`�
 실험명은 모델 동작을 바꾸지 않는다.
 기존 `vitqat.train` 명령은 실행 조건에 맞는 실험별 진입점으로 교체한다.
 
+## 사전학습 백본 로더
+
+Python에서 [공통 로더](../utils/pretrained.py)에 timm 모델 이름과 가중치 태그를 전달한다.
+아래는 회의에서 선택한 EVA02 모델의 로딩 예시다.
+
+```python
+from utils.pretrained import load_pretrained_backbone
+
+model = load_pretrained_backbone(
+    "eva02_base_patch14_448",
+    weights="mim_in22k_ft_in22k_in1k",
+)
+```
+
+EVA02 예시는 모델의 기본 입력 크기인 448×448을 사용한다. 분류 클래스 수는 Food-101에 맞춰
+101이 기본이며, `num_classes`나 모델별 옵션(예를 들어 `img_size`, `drop_path_rate`)을 전달할 수 있다.
+[EVA02 모델 카드](https://huggingface.co/timm/eva02_base_patch14_448.mim_in22k_ft_in22k_in1k)
+
+다른 모델이나 사전학습 세트를 비교하려면 모델 이름 또는 `weights`를 바꾼다.
+태그를 생략하면 timm이 해당 모델의 기본 가중치를 사용한다. 등록된 가중치는 첫 실행에
+다운로드하고 캐시한다. 로컬 사전학습 파일은 `weights_path`로 지정하며, 모델과 호환되는
+PyTorch state dict 또는 safetensors 파일을 사용한다. Scratch는 `pretrained=False`로 초기화한다.
+[timm 모델 API](https://huggingface.co/docs/timm/reference/models)
+
+```python
+model = load_pretrained_backbone("vit_tiny_patch16_224", weights_path="weights/vit_tiny.safetensors")
+scratch = load_pretrained_backbone("vit_tiny_patch16_224", pretrained=False)
+```
+
 ## 실험별 폴더와 공통 모듈
 
 실험 진입점과 전용 로직은 `A1/`~`A4/`, `B1/`, `B2/`에 둔다.
