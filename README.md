@@ -10,6 +10,7 @@ Food-101 ViT의 양자화와 token pruning 비교 실험.
 | [A4](docs/A4/README.md) | CLS attention pruning + QAT 공동 학습 |
 | [B1](docs/B1/README.md) | Cropr + Linear QAT(LSQ/LSQ+) 공동 학습 |
 | [B2](docs/B2/README.md) | Cropr + QAT 공동 학습 |
+| [B3](B3/README.md) | 2-a Cropr FP32 학습 후 PTQ 보정·평가 |
 
 각 실험은 `model.py`, `train.py`, `inference.py`와 자체 양자화·pruning 구현을 소유한다.
 `utils/`에는 데이터·checkpoint·계측·반복 실행 같은 공통 기반 기능만 둔다.
@@ -23,7 +24,7 @@ conda env create -f environment.yml
 conda activate vitqat
 python -m A2.train --data-root data --output A2/runs/seed42
 python -m A2.inference --eval-checkpoint A2/runs/seed42/best.pt --data-root data --output A2/runs/eval
-python -m pytest tests A3/tests A4/tests B1/tests B2/tests -q
+python -m pytest tests A3/tests A4/tests B1/tests B2/tests B3/tests -q
 ```
 
 Python 의존성은 [requirements.txt](requirements.txt) 하나로 관리한다. `environment.yml`도 이 파일을 참조한다.
