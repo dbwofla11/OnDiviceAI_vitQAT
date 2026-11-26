@@ -55,6 +55,24 @@ def measure_vit(model, image_size, device, warmup=10, repeats=100, *, sample=Non
     params = sum(p.numel() for p in model.parameters())
     estimated_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
 
+    latency = measure_latency(model, x, device, warmup, repeats)
+    return dict(
+        params=params, gflops=flops / 1e9,
+        flops_convention="2 FLOPs/MAC; inference Conv/Linear, ViT QK/AV and supplied scorer costs; excludes bias, norm, softmax, sorting, quantization",
+        parameter_bytes=estimated_bytes,
+        tokens_per_block=tokens_per_block, tokens_after_pruning=tokens_after_pruning,
+        latency_ms_mean=latency["mean"], latency_ms_median=latency["median"], latency_ms_p95=latency["p95"],
+        latency_batch_size=1, latency_warmup=warmup, latency_repeats=repeats,
+        latency_scope="model forward only; input already on device; no data loading or transfer",
+    )
+
+
+@torch.inference_mode()
+def measure_latency(model, x, device, warmup=10, repeats=100):
+    """Forward time in ms (mean/median/p95) of any callable model on an input already on the device."""
+    if warmup < 0 or repeats < 1:
+        raise ValueError("warmup >= 0 and repeats >= 1 are required")
+
     def sync():
         if str(device).startswith("cuda"):
             torch.cuda.synchronize(device)
@@ -70,13 +88,5 @@ def measure_vit(model, image_size, device, warmup=10, repeats=100, *, sample=Non
         sync()
         timings.append((time.perf_counter() - start) * 1000)
     ordered = sorted(timings)
-    return dict(
-        params=params, gflops=flops / 1e9,
-        flops_convention="2 FLOPs/MAC; inference Conv/Linear, ViT QK/AV and supplied scorer costs; excludes bias, norm, softmax, sorting, quantization",
-        parameter_bytes=estimated_bytes,
-        tokens_per_block=tokens_per_block, tokens_after_pruning=tokens_after_pruning,
-        latency_ms_mean=statistics.mean(timings), latency_ms_median=statistics.median(timings),
-        latency_ms_p95=ordered[math.ceil(0.95 * len(ordered)) - 1],
-        latency_batch_size=1, latency_warmup=warmup, latency_repeats=repeats,
-        latency_scope="model forward only; input already on device; no data loading or transfer",
-    )
+    return dict(mean=statistics.mean(timings), median=statistics.median(timings),
+                p95=ordered[math.ceil(0.95 * len(ordered)) - 1])

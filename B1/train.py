@@ -13,6 +13,7 @@ from utils.runner import run
 from .config import parser, validate, CHECKPOINT_DEFAULTS
 from .model import build_model, restore_model
 from .metrics import measure_model, report_results
+from .modules import project_quantizer_steps
 from .inference import evaluate
 
 
@@ -65,6 +66,7 @@ def train_epoch(model, batches, optimizer, args, epoch, steps_per_epoch=None):
         if i + 1 == end:
             nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad, error_if_nonfinite=True)
             optimizer.step()
+            project_quantizer_steps(model)  # AdamW can drive a small 8-bit step through zero; see quantizers.py.
             optimizer.zero_grad(set_to_none=True)
             updates += 1
         total_loss += loss.item() * images.shape[0]

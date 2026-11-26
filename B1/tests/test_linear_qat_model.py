@@ -1,5 +1,6 @@
 """Linear QAT conversion of the original Cropr ViT: scope, equivalence, gradients, init, metrics."""
 import copy
+import warnings
 
 import pytest
 import timm
@@ -14,7 +15,9 @@ from B1.config import parser
 from B1.cropr_adapter import CrossAttention, CroprViT
 from B1.metrics import measure_model
 from B1.model import build_model, restore_model
-from B1.modules import QuantConv2d, QuantCrossAttention, QuantLinear, prepare_linear_qat, quantizers
+from B1.integer import BACKEND, integer_kernel_error
+from B1.modules import (QuantConv2d, QuantCrossAttention, QuantLinear, collapsed_quantizer_channels,
+                        prepare_linear_qat, project_quantizer_steps, quantizers)
 from B1.quantizers import ActivationQuantizer, LSQWeightQuantizer, StatsQWeightQuantizer
 from B1.train import train_epoch
 from B2 import config as b2_config, metrics as b2_metrics, model as b2_model
@@ -265,7 +268,12 @@ def test_metrics_exclude_quantizer_parameters_and_estimate_storage(tmp_path):
         assert metrics["gflops"] == reference_metrics["gflops"]
         assert metrics["tokens_per_block"] == [17] + list(range(15, 4, -1))
         assert metrics["token_pruning_ratio"] == 12 / 16
-        assert metrics["latency_backend"] == "fake_quant_fp32" and metrics["integer_latency_ms"] is None
+        assert metrics["latency_backend"] == "fake_quant_fp32"
+        if integer_kernel_error() is None:  # Integer kernels depend on the CPU; a reason is reported otherwise.
+            assert metrics["integer_latency_ms"] > 0 and metrics["integer_latency_backend"] == BACKEND
+        else:
+            assert metrics["integer_latency_ms"] is None and metrics["integer_latency_note"]
+        assert metrics["collapsed_quantizer_channels"] == 0
         assert metrics["quantizer_params"] == sum(p.numel() for q in quantizers(model) for p in q.parameters())
         assert len(metrics["quantized_layers"]) == 2 + 12 * 4 + 11
         assert metrics["storage_estimated_packed_bytes"] < metrics["params"] * 4
@@ -276,3 +284,51 @@ def test_metrics_exclude_quantizer_parameters_and_estimate_storage(tmp_path):
         sizes[bits] = metrics["storage_estimated_packed_bytes"]
     block_weights = sum(block.get_submodule(layer).weight.numel() for block in model.blocks for layer in BLOCK_LAYERS)
     assert sizes[4] - sizes[2] == block_weights * 2 // 8
+
+
+def test_train_epoch_repairs_and_prevents_collapsed_steps(tmp_path):
+    args = settings(tmp_path)
+    model = build_model(args)
+    images, labels = batch()
+    model.train()(images)  # Initialize the activation ranges.
+    with torch.no_grad():  # What an AdamW update can do to an 8-bit step (about 4e-4, close to the lr).
+        model.head.weight_quant.step[:2] = torch.tensor([-0.02, -0.5])
+        model.patch_embed.proj.weight_quant.step[3] = 0.0
+        model.cropr[2].cross_attn.query_quant.step[0] = -1e-4
+        model.blocks[1].attn.proj.input_quant.step.fill_(-1e-3)  # The whole activation tensor.
+    assert collapsed_quantizer_channels(model) == 5
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.0)
+    train_epoch(model, DataLoader(TensorDataset(images, labels), batch_size=2), optimizer, args, 0, 1)
+    assert collapsed_quantizer_channels(model) == 0
+    assert all((q.step > 0).all() for q in quantizers(model) if getattr(q, "step", None) is not None)
+    assert torch.isfinite(model.eval()(images)).all()
+    for quantizer in quantizers(model):  # The projection never rejects a healthy step again.
+        if isinstance(quantizer, LSQWeightQuantizer):
+            assert torch.isfinite(quantizer.step).all()
+
+
+def test_projection_leaves_healthy_steps_bit_identical(tmp_path):
+    model = build_model(settings(tmp_path))
+    before = {name: value.detach().clone() for name, value in model.named_parameters() if name.endswith(".step")}
+    project_quantizer_steps(model)
+    assert before and all(torch.equal(value, before[name]) for name, value in model.named_parameters() if name in before)
+
+
+def test_restoring_a_collapsed_checkpoint_warns_and_is_counted_in_metrics(tmp_path):
+    args = settings(tmp_path)
+    model = build_model(args)
+    model.train()(batch()[0])
+    state = copy.deepcopy(model.state_dict())
+    state["head.weight_quant.step"][5] = -0.01  # As saved by code without the projection.
+    state["blocks.3.mlp.fc1.input_quant.step"].fill_(1e-9)
+    restored = build_model(args)
+    with pytest.warns(UserWarning, match="2 quantizer channels have a collapsed step"):
+        restore_model(restored, dict(config=vars(args), model=state))
+    assert measure_model(restored, args)["collapsed_quantizer_channels"] == 2
+    # Checkpoints saved before the initial_step buffer existed still restore strictly.
+    legacy = {key: value for key, value in state.items() if not key.endswith("initial_step")}
+    with pytest.warns(UserWarning, match="collapsed"):
+        restore_model(build_model(args), dict(config=vars(args), model=legacy))
+    with warnings.catch_warnings():  # A healthy checkpoint restores without any warning.
+        warnings.simplefilter("error")
+        restore_model(build_model(args), dict(config=vars(args), model=model.state_dict()))

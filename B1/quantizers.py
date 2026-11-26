@@ -14,6 +14,8 @@ from torch import nn
 
 BITS = (2, 3, 4, 8)
 EPS = 1e-8
+# Weight steps are projected to stay above this fraction of their channel's LSQ+ initialization.
+MIN_STEP_FRACTION = 0.1
 MSE_SAMPLES = 2**18
 MSE_GRID = 100
 
@@ -30,13 +32,23 @@ def grad_scale(x, scale):
 
 
 def positive(x):
-    """Keep a step size positive without blocking its gradient (as in the OFQ reference code)."""
-    return x + (x.clamp_min(EPS) - x).detach()
+    """Keep a step size positive without blocking its gradient (as in the OFQ reference code).
+
+    Written as clamp + 0 so the forward value is exactly max(x, EPS); x + (clamp - x) loses EPS to
+    rounding and returns 0 for x <= -0.25.
+    """
+    return x.clamp_min(EPS).detach() + (x - x.detach())
 
 
 def check_bits(bits):
     if bits not in BITS:
         raise ValueError(f"Supported bit widths: {BITS}")
+
+
+def lsqplus_weight_step(flat, bits):
+    """LSQ+ Sec. 3.2.1 weight init, per row: max(|mu - 3 sigma|, |mu + 3 sigma|) / 2^(b-1)."""
+    mean, std = flat.mean(1), flat.std(1)
+    return torch.maximum((mean - 3 * std).abs(), (mean + 3 * std).abs()) / 2 ** (bits - 1)
 
 
 class WeightQuantizer(nn.Module):
@@ -48,6 +60,13 @@ class WeightQuantizer(nn.Module):
         self.bits = bits
         self.channels = channels
         self.qmin, self.qmax = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+
+    def project_step(self, weight):
+        """No learnable step by default (StatsQ); LSQ overrides this."""
+
+    def collapsed_channels(self, weight):
+        """Number of channels whose step is too small to represent the weights; 0 without a step."""
+        return 0
 
 
 class LSQWeightQuantizer(WeightQuantizer):
@@ -67,17 +86,48 @@ class LSQWeightQuantizer(WeightQuantizer):
             if init == "lsq":
                 step = 2 * flat.abs().mean(1) / math.sqrt(self.qmax)
             else:
-                mean, std = flat.mean(1), flat.std(1)
-                step = torch.maximum((mean - 3 * std).abs(), (mean + 3 * std).abs()) / 2 ** (bits - 1)
+                step = lsqplus_weight_step(flat, bits)
         # 1-D shape: utils.optim.weight_decay_groups places ndim <= 1 parameters in the no-weight-decay group.
         self.step = nn.Parameter(step.clamp_min(EPS).clone())
 
+    def effective_step(self, weight):
+        """Per-channel step actually used by forward, so integer conversion uses the same grid."""
+        # LSQ g = 1/sqrt(N_W Q_P); N_W is the number of weights sharing this channel's step.
+        return positive(grad_scale(self.step, 1.0 / math.sqrt(weight.flatten(1).shape[1] * self.qmax)))
+
     def forward(self, weight):
         flat = weight.flatten(1)
-        # LSQ g = 1/sqrt(N_W Q_P); N_W is the number of weights sharing this channel's step.
-        step = positive(grad_scale(self.step, 1.0 / math.sqrt(flat.shape[1] * self.qmax)))
-        step = step.unsqueeze(1)
+        step = self.effective_step(weight).unsqueeze(1)
         return (round_pass((flat / step).clamp(self.qmin, self.qmax)) * step).view_as(weight)
+
+    @torch.no_grad()
+    def integer_codes(self, weight):
+        """Signed integer codes in [qmin, qmax] and the per-channel step: weight_hat = step * codes."""
+        flat = weight.flatten(1)
+        step = self.effective_step(weight)
+        return (flat / step.unsqueeze(1)).clamp(self.qmin, self.qmax).round().to(torch.int8), step
+
+    def step_floor(self, weight):
+        return (MIN_STEP_FRACTION * lsqplus_weight_step(weight.detach().flatten(1), self.bits)).clamp_min(EPS)
+
+    @torch.no_grad()
+    def project_step(self, weight):
+        """Clamp the step after an optimizer update so a channel never collapses.
+
+        An 8-bit step starts near the AdamW learning rate (about 4e-4 vs 5e-4), so a few noisy updates
+        can push it to zero or below. positive() then maps it to EPS and the channel quantizes to ~0.
+        Steps above the floor are left untouched.
+        """
+        self.step.copy_(torch.maximum(self.step, self.step_floor(weight)))
+
+    @torch.no_grad()
+    def collapsed_channels(self, weight):
+        """Channels well below the floor; zero for checkpoints trained with project_step.
+
+        Half the floor, because a channel sitting exactly on the floor is healthy and the floor is
+        recomputed from the weights (CUDA and CPU standard deviations differ in the last bits).
+        """
+        return int((self.step < 0.5 * self.step_floor(weight)).sum())
 
     def extra_repr(self):
         return f"bits={self.bits}, channels={self.channels}, init={self.init}"
@@ -111,7 +161,8 @@ class ActivationQuantizer(nn.Module):
 
     asymmetric=True (LSQ+): x_hat = clamp(round((x - beta) / s), 0, 2^b - 1) * s + beta with a
     learnable offset beta, initialized by minimizing ||x_hat - x||^2 on the first training batch.
-    The offset folds into the layer bias at inference (LSQ+ Eq. 5).
+    This forward keeps the offset explicit. Integer execution (integer.py) folds it into the layer
+    bias, as in LSQ+ Eq. 5.
     asymmetric=False (LSQ): signed range [-2^(b-1), 2^(b-1) - 1], s = 2 mean|x| / sqrt(Qp).
     """
 
@@ -128,10 +179,14 @@ class ActivationQuantizer(nn.Module):
             self.register_parameter("offset", None)
         self.step = nn.Parameter(torch.ones(1))
         self.register_buffer("initialized", torch.zeros((), dtype=torch.bool))
+        self.register_buffer("initial_step", torch.ones(1))  # Reference for project_step, fixed at initialization.
         self._ready = False  # Mirrors the buffer to avoid a device sync every forward.
 
-    def _load_from_state_dict(self, *args, **kwargs):
-        super()._load_from_state_dict(*args, **kwargs)
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Checkpoints saved before initial_step existed use the loaded step as their own reference.
+        if prefix + "initial_step" not in state_dict and prefix + "step" in state_dict:
+            state_dict[prefix + "initial_step"] = state_dict[prefix + "step"].detach().clone()
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
         self._ready = False
 
     @torch.no_grad()
@@ -143,6 +198,7 @@ class ActivationQuantizer(nn.Module):
             step, offset = mse_asymmetric_range(x, self.qmax)
             self.step.fill_(step)
             self.offset.fill_(offset)
+        self.initial_step.copy_(self.step)
         self.initialized.fill_(True)
 
     def forward(self, x):
@@ -161,6 +217,21 @@ class ActivationQuantizer(nn.Module):
         # The offset sum spans the same elements as the step gradient, so it uses the same g.
         offset = grad_scale(self.offset, g)
         return round_pass(((x - offset) / step).clamp(self.qmin, self.qmax)) * step + offset
+
+    @torch.no_grad()
+    def project_step(self):
+        """Clamp the step after an optimizer update (see LSQWeightQuantizer.project_step).
+
+        A layer input such as attn.proj can start at an 8-bit step near 4e-4, about the AdamW learning
+        rate, so a few updates can collapse the whole tensor. Activations have no per-batch statistic
+        that stays fixed at inference, so the floor is relative to the initial step.
+        """
+        self.step.copy_(torch.maximum(self.step, (MIN_STEP_FRACTION * self.initial_step).clamp_min(EPS)))
+
+    @torch.no_grad()
+    def collapsed(self):
+        """True when the step is far below the floor (a channel on the floor is healthy)."""
+        return self.step.item() <= max(1e-6, 0.5 * MIN_STEP_FRACTION * self.initial_step.item())
 
     def extra_repr(self):
         return f"bits={self.bits}, asymmetric={self.asymmetric}"
