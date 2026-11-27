@@ -7,7 +7,7 @@
 
 QAT는 FP32 연산에 fake quantization을 적용하는 구현이다. 학습과 `inference`는 같은 quantizer를 사용하므로 양자화 방식이 같다.
 둘 다 비대칭(affine) 양자화이며 weight는 출력 채널별, activation은 tensor별로 `0..2^b-1` 범위와 zero point를 쓴다.
-`inference`의 지연시간은 실제 정수 커널 성능을 의미하지 않는다.
+`latency_ms_*`는 fake quantization(FP32 연산) 시간이라 정수 커널 성능이 아니다. `--device cuda`로 평가하면 공용 함수(`utils/int8.py`, `utils/tensorrt.py`)가 같은 grid의 INT8 Q/DQ 복사본을 TensorRT 엔진으로 실행해 `integer_latency_ms*`에 기록한다(TensorRT가 없으면 `null`과 이유).
 
 ## 폴더 구조
 

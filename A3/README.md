@@ -43,7 +43,8 @@ pruned: 197, 180, 164, 148, 132, 116, 100,  84,  68,  52,  36, 197
 
 QAT observer는 고정한다. 평가 전후 모델 state와 입력 checkpoint의 hash가 유지되는지도 확인한다.
 추론은 A2 학습과 같은 비대칭(affine) fake quantization을 그대로 사용하는 FP32 연산이다.
-따라서 지연시간은 정수 커널 성능을 의미하지 않는다.
+따라서 `latency_ms_*`는 정수 커널 성능이 아니다. `--device cuda`이면 dense·pruned 각각을 공용 함수(`utils/int8.py`, `utils/tensorrt.py`)로 TensorRT INT8 엔진에서 재서 `integer_latency_ms*`에,
+두 조건의 비를 `comparison.json`의 `integer_latency_speedup`에 기록한다. 엔진 파일은 평가 결과를 모두 쓴 뒤 `tensorrt/`에 저장된다.
 
 ## 실행 준비
 

@@ -20,8 +20,10 @@ weight는 출력 채널별 대칭 LSQ(기본 LSQ+ 초기화)이고, activation�
 작은 step이 AdamW로 0 이하가 되어 채널이나 activation이 붕괴하지 않도록 `optimizer.step()` 뒤에 step 하한을 적용한다.
 
 정확도는 fake-quant로 평가한다. 정수 latency는 두 경로로 잰다. 둘 다 학습한 grid를 바꾸지 않는다.
-- CPU(`integer_latency_ms`): `integer.py`가 INT8 커널(oneDNN)로 실행한다. `--device cpu`로 평가할 때만 측정하고, 그 외에는 `null`과 이유를 기록한다.
-- GPU: `python -m B1.benchmark_tensorrt_int8`이 INT8 Q/DQ ONNX를 만들고 TensorRT 엔진으로 batch 1 시간을 잰다(W2A8은 `--activation-bits 8`로 학습). GPU가 없는 환경에서는 ONNX까지만 만들 수 있다.
+- CPU(`--device cpu`): `integer.py`가 INT8 커널(oneDNN)로 실행한다.
+- GPU(`--device cuda`): 다른 실험과 같은 공용 함수(`utils/int8.py`, `utils/tensorrt.py`)가 INT8 Q/DQ 복사본을 TensorRT 엔진으로 실행한다.
+  FP32 엔진 비교와 엔진 정확도까지는 `python -m B1.benchmark_tensorrt_int8`로 잰다(W2A8은 `--activation-bits 8`로 학습).
+- 결과는 `integer_latency_ms*`이고, 측정할 수 없으면 `null`과 이유를 기록한다.
 
 비교군 간 model·초기화·bit·seed·증강·학습 조건을 맞춘다.
 [코드 소유권과 확장 방법](../experiment-folder-structure.md), [학습 조건·지표](../experiments.md).

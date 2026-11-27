@@ -15,11 +15,11 @@ from B1 import benchmark_tensorrt_int8 as cli
 from B1.model import build_backbone, build_model
 from B1.modules import QuantConv2d, QuantCrossAttention, QuantLinear, _quantize_layer
 from B1.quantizers import ActivationQuantizer
-from B1.tensorrt_int8 import (ActivationQDQ, ExportConv2d, ExportCrossAttention, ExportCropr, ExportLinear,
-                              audit_quantized_products, convert_for_tensorrt, expected_quantized_products,
-                              export_onnx)
+from B1.tensorrt_int8 import (ExportCropr, ExportCrossAttention, activation_grid, convert_for_tensorrt, exportable,
+                              weight_codes)
+from utils.int8 import ActivationQDQ, Int8Conv2d, Int8Linear, audit_int8_products, export_onnx, int8_products
 from B1.tests.helpers import CONFIGS, settings, trained_model
-from B1.tensorrt_engine import compare_logits, evaluate_fixed_batch, require_tensorrt, run_backend
+from utils.tensorrt import compare_logits, evaluate_fixed_batch, require_tensorrt, run_backend
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +40,7 @@ def test_activation_qdq_keeps_the_learned_grid(bits, asymmetric):
     x = torch.randn(8, 16, 64) * 2 + (0.3 if asymmetric else 0)
     quantizer.train()(x)  # initialize on the "first batch"
     quantizer.eval()
-    qdq = ActivationQDQ(quantizer)
+    qdq = ActivationQDQ(activation_grid(quantizer))
     with torch.no_grad():
         # Q/DQ works on signed INT8 around a shifted zero; adding the real offset back gives x_hat.
         x_hat, exported = quantizer(x), qdq(x) + qdq.offset
@@ -93,7 +93,7 @@ def test_exported_layers_match_fake_quant_layers(tmp_path, name):
                 assert isinstance(target, ExportCrossAttention)
             x, _, _ = model.cropr[index](x, inference=True)
     quantized = len([m for m in model.modules() if isinstance(m, (QuantLinear, QuantConv2d, QuantCrossAttention))])
-    assert len(seen) == quantized == expected_quantized_products(exported)
+    assert len(seen) == quantized == int8_products(exported)
 
 
 @pytest.mark.parametrize("extra", [[], ["--activation-bits", "8"], ["--weight-bits", "4", "--activation-bits", "8"]])
@@ -112,8 +112,8 @@ def test_export_leaves_the_source_model_unchanged(tmp_path):
     exported = convert_for_tensorrt(model)
     assert all(torch.equal(value, model.state_dict()[key]) for key, value in before.items())
     assert isinstance(model.blocks[0].mlp.fc1, QuantLinear)
-    assert isinstance(exported.blocks[0].mlp.fc1, ExportLinear)
-    assert isinstance(exported.patch_embed.proj, ExportConv2d)
+    assert isinstance(exported.blocks[0].mlp.fc1, Int8Linear)
+    assert isinstance(exported.patch_embed.proj, Int8Conv2d)
     assert isinstance(exported.cropr[0], ExportCropr) and not isinstance(model.cropr[0], ExportCropr)
     with pytest.raises(RuntimeError, match="inference only"):
         exported.cropr[0](torch.randn(1, 5, 192), inference=False)
@@ -127,7 +127,7 @@ def test_unsupported_models_are_rejected(tmp_path):
     with pytest.raises(ValueError, match="initialized"):
         convert_for_tensorrt(build_model(settings(tmp_path)).eval())  # Activation ranges never calibrated.
     fp32_layers_only = trained_model(settings(tmp_path, "--first-last-bits", "32", "--cropr-scorer-bits", "32"))
-    assert expected_quantized_products(convert_for_tensorrt(fp32_layers_only)) == 48
+    assert int8_products(convert_for_tensorrt(fp32_layers_only)) == 48
     with pytest.raises(ValueError, match="no Linear QAT layers"):
         convert_for_tensorrt(nn.Sequential(nn.Linear(4, 4)))
 
@@ -146,9 +146,9 @@ def test_exported_graph_has_int8_products_and_runs_in_onnxruntime(tmp_path, name
     images = torch.randn(3, 3, 64, 64)
     path = tmp_path / "model.onnx"
     graph = export_onnx(exported, images[:1], path)
-    products = audit_quantized_products(graph)
-    quantized = sum(row["quantized"] for row in products)
-    expected = expected_quantized_products(exported)
+    products = audit_int8_products(graph)
+    quantized = sum(row["int8"] for row in products)
+    expected = int8_products(exported)
     assert quantized == expected
     # Attention QK^T/AV stay FP32: 2 products per block, or none once blocks are gone.
     assert len(products) - quantized == 2 * len(model.blocks)
@@ -171,8 +171,8 @@ def test_fp32_reference_model_exports_without_quantization(tmp_path):
     fp32.eval()
     images = torch.randn(2, 3, 64, 64)
     path = tmp_path / "fp32.onnx"
-    graph = export_onnx(fp32, images[:1], path)  # Upstream Cropr uses argsort(stable=False), which is replaced.
-    assert not any(row["quantized"] for row in audit_quantized_products(graph))
+    graph = export_onnx(exportable(fp32), images[:1], path)  # Upstream Cropr uses argsort(stable=False).
+    assert not any(row["int8"] for row in audit_int8_products(graph))
     with torch.inference_mode():
         reference = fp32(images)
     results = torch.cat([run_onnxruntime(path, images[i:i + 1]) for i in range(2)])
@@ -254,7 +254,8 @@ def test_native_engine_reproduces_the_exported_layer(tmp_path):
     """Smallest end-to-end check of the GPU runner. Run it on the RTX 4090 machine before the benchmark."""
     pytest.importorskip("tensorrt")
     layer = quantized_linear()
-    model = nn.Sequential(ExportLinear(layer)).eval()
+    model = nn.Sequential(Int8Linear(activation_grid(layer.input_quant), weight_codes(layer.weight, layer.weight_quant),
+                                     layer.bias)).eval()
     x = torch.randn(1, 32)
     with torch.inference_mode():
         reference = model(x)

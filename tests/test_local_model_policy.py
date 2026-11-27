@@ -96,6 +96,8 @@ def test_experiment_owns_its_quantization_and_bit_widths(name):
 
 def test_no_algorithm_dispatch_or_quantization_implementation_in_utils():
     root = Path(__file__).resolve().parents[1]
+    # QAT implementations stay experiment-owned. utils/int8.py and utils/tensorrt.py are the shared INT8
+    # deployment helpers every experiment imports to time integer kernels; the old module names stay removed.
     for removed in ("models.py", "train.py", "training.py", "quantization.py", "tensorrt_int8.py",
                     "tensorrt_benchmark.py", "pruning_metrics.py"):
         assert not (root / "utils" / removed).exists()

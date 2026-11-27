@@ -15,14 +15,19 @@ from .config import CHECKPOINT_DEFAULTS, validate
 from .metrics import measure_model
 from .model import build_backbone, build_model, restore_model
 from .modules import collapsed_quantizer_channels
-from .tensorrt_engine import compare_logits, evaluate_fixed_batch, require_tensorrt, run_backend
-from .tensorrt_int8 import (audit_quantized_products, convert_for_tensorrt, expected_quantized_products,
-                            export_onnx)
+from .tensorrt_int8 import convert_for_tensorrt, exportable
 from utils.classification import evaluate
+from utils.int8 import audit_int8_products, export_onnx, int8_products
+from utils.tensorrt import compare_logits, evaluate_fixed_batch, require_tensorrt, run_backend
 from utils.data import loader, make_food101_data as make_data
 from utils.reproducibility import configure_backend, seed_all
 
 ENGINES = ("fp32_master", "b1_int8")
+
+
+def export_b1(model, example, path):
+    """ONNX export of a B1 model (INT8 copy or FP32 reference) with exportable Cropr modules."""
+    return export_onnx(exportable(model), example, path)
 
 
 def parse_args(argv=None):
@@ -139,10 +144,10 @@ def main(argv=None):
                   note="Synthetic checks are not Food-101 accuracy. Q/DQ coverage is not proof of INT8 kernels: "
                        "inspect b1_int8.layers.json. GPU compute time excludes build, transfers and preprocessing.")
     for name, net in (("fp32_master", fp32), ("b1_int8", converted)):
-        graph = export_onnx(net, x, output / f"{name}.onnx")
+        graph = export_b1(net, x, output / f"{name}.onnx")
         if name == "b1_int8":
-            products = audit_quantized_products(graph)
-            quantized, expected_count = sum(row["quantized"] for row in products), expected_quantized_products(converted)
+            products = audit_int8_products(graph)
+            quantized, expected_count = sum(row["int8"] for row in products), int8_products(converted)
             if quantized != expected_count:
                 raise RuntimeError(f"Expected {expected_count} Q/DQ products in the graph, found {quantized}: {products}")
             report.update(onnx_products=len(products), onnx_quantized_products=quantized)
@@ -179,7 +184,7 @@ def main(argv=None):
             try:
                 net = fp32 if name == "fp32_master" else converted
                 report[name] = run_backend(trt, output, name, net, x, references[name], options, batches,
-                                           export_model=export_onnx, evaluate_batches=evaluate_fixed_batch,
+                                           export_model=export_b1, evaluate_batches=evaluate_fixed_batch,
                                            compare_outputs=compare_logits, allow_tf32=False,
                                            int8=name == "b1_int8")
                 save()
