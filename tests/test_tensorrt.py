@@ -1,14 +1,14 @@
-"""TensorRT runner helpers (B1 owns the runner) that need no GPU: timing counts, batch routing, accuracy accounting."""
+"""Shared TensorRT runner (utils.tensorrt) parts that need no GPU: timing counts, batch routing, accounting."""
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from B1.tensorrt_engine import compare_logits, evaluate_fixed_batch
+from utils.tensorrt import compare_logits, evaluate_fixed_batch
 
 
 def test_native_result_summary():
-    from B1.tensorrt_engine import summarize_results
+    from utils.tensorrt import summarize_results
 
     logits = torch.tensor([[0.25, 0.75]])
     result = summarize_results([1, 4, 3, 2], logits, logits)
@@ -22,7 +22,7 @@ def test_native_result_summary():
 
 
 def test_native_requires_cuda(monkeypatch):
-    from B1.tensorrt_engine import require_tensorrt
+    from utils.tensorrt import require_tensorrt
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(RuntimeError, match="CUDA-enabled PyTorch"):
@@ -52,7 +52,7 @@ def test_accuracy_keeps_partial_batch_and_uses_sample_weighted_loss():
 
 
 def test_timing_has_exact_repeat_count(monkeypatch):
-    from B1.tensorrt_engine import time_forwards
+    from utils.tensorrt import time_forwards
 
     launches, measurements = [], []
     event = SimpleNamespace(record=lambda stream: None, synchronize=lambda: None,
@@ -65,7 +65,7 @@ def test_timing_has_exact_repeat_count(monkeypatch):
 
 @pytest.mark.parametrize("eval_batch_size", [1, 4])
 def test_separate_batch_routing_does_not_replace_timing(monkeypatch, tmp_path, eval_batch_size):
-    from B1 import tensorrt_engine as runner
+    from utils import tensorrt as runner
 
     calls, exports = [], []
     batches = object()

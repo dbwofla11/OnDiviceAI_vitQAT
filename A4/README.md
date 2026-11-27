@@ -5,7 +5,7 @@
 현재 데이터셋은 Food-101(101 classes), 기본 모델은 `vit_tiny_patch16_224`, 입력 크기는 224다.
 비교 실험에서는 모델·초기화(scratch/pretrained)·seed·데이터 split·증강·학습 조건을 맞춘다.
 
-QAT는 FP32 연산에 fake quantization을 적용하는 구현이다. 일반 `inference`의 지연시간은 실제 정수 커널 성능을 의미하지 않는다.
+QAT는 FP32 연산에 fake quantization을 적용하는 구현이다. `latency_ms_*`는 정수 커널 성능이 아니다. `--device cuda`로 평가하면 공용 함수(`utils/int8.py`, `utils/tensorrt.py`)가 같은 grid의 INT8 Q/DQ 복사본을 TensorRT 엔진으로 실행해 `integer_latency_ms*`에 기록한다(TensorRT가 없으면 `null`과 이유).
 
 CLS 토큰은 유지하고 patch token을 제거한다. 첫 단계에서 `R+1`개, 이후 단계에서 `R`개를 제거하며 마지막 block 전에는 제거한 토큰을 다시 합치는 LLF를 적용한다. `R`의 기본값은 16이다.
 

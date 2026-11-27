@@ -6,6 +6,7 @@ import torch
 import torchvision
 from utils.results import save_results
 from utils.metrics import measure_latency, measure_vit
+from utils.tensorrt import deployment_latency
 from .cropr_adapter import Cropr, CrossAttention
 from .integer import BACKEND, to_integer, unsupported_reason
 from .modules import collapsed_quantizer_channels, quantized_modules, quantizers
@@ -68,12 +69,18 @@ def auxiliary_parameter_ids(model):
 def integer_latency(model, args):
     """Latency of the same quantization grids on integer (INT8) kernels; None fields carry the reason.
 
-    The kernels are CPU only. Accuracy and the other fields still come from the fake-quant model.
+    On a CUDA GPU the shared TensorRT path times an INT8 engine; on the CPU the oneDNN kernels of
+    integer.py run the model. Accuracy and the other fields still come from the fake-quant model.
     """
+    if str(args.device).startswith("cuda"):
+        from .tensorrt_int8 import convert_for_tensorrt
+        return deployment_latency(model, device=args.device, image_size=args.image_size, warmup=args.latency_warmup,
+                                  repeats=args.latency_repeats, output=args.output,
+                                  int8_export=lambda: convert_for_tensorrt(model), name="b1_int8")
     fields = dict(integer_latency_ms=None, integer_latency_ms_mean=None, integer_latency_ms_p95=None,
                   integer_latency_backend=None, integer_latency_note=None)
     if not str(args.device).startswith("cpu"):
-        fields["integer_latency_note"] = "PyTorch has no CUDA INT8 kernel; evaluate with --device cpu"
+        fields["integer_latency_note"] = "integer latency needs --device cuda (TensorRT) or --device cpu (oneDNN)"
         return fields
     reason = unsupported_reason(model)
     if reason:

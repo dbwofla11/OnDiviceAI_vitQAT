@@ -158,10 +158,12 @@ def test_inexact_kernel_is_detected_and_reported_instead_of_measured(tmp_path, m
         integer.integer_kernel_error.cache_clear()
 
 
-def test_cuda_evaluation_explains_why_integer_latency_is_missing(tmp_path):
+@pytest.mark.skipif(torch.cuda.is_available(), reason="Checks the message on machines without a CUDA GPU")
+def test_cuda_evaluation_uses_tensorrt_and_explains_when_it_cannot(tmp_path):
     model = trained_model(settings(tmp_path))
-    fields = integer_latency(model, SimpleNamespace(device="cuda", image_size=64, latency_warmup=0, latency_repeats=1))
-    assert fields["integer_latency_ms"] is None and "--device cpu" in fields["integer_latency_note"]
+    args = SimpleNamespace(device="cuda", image_size=64, latency_warmup=0, latency_repeats=1, output=str(tmp_path))
+    fields = integer_latency(model, args)
+    assert fields["integer_latency_ms"] is None and "TensorRT" in fields["integer_latency_note"]
 
 
 @needs_kernel

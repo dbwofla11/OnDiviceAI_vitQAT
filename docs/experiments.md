@@ -162,7 +162,7 @@ B1은 observer 대신 LSQ 계열의 학습 가능한 step size를 사용하는 L
 **학습과 추론의 양자화 방식은 모든 QAT 실험에서 같다.**
 - 추론은 학습한 quantizer 객체를 그대로 사용하고 observer만 고정한다. 대칭/비대칭 grid가 바뀌지 않는다.
 - A2/A3/A4/B2는 학습·추론 모두 비대칭(affine)이다. B1은 학습·추론 모두 같은 LSQ/LSQ+ grid를 쓴다.
-- 추론에서 activation을 대칭 INT8로 재매핑하던 TensorRT export 경로는 사용하지 않아 제거했다.
+- 정수 실행 측정(TensorRT)도 같은 grid를 쓴다. activation을 대칭 INT8로 재매핑하던 예전 export 경로는 제거했고, `utils/int8.py`가 offset을 FP32 보정으로 옮겨 grid를 유지한다.
 - `tests/test_quantization_consistency.py`가 보정 후 학습 모드와 추론 모드 forward의 logits가 정확히 같은지 확인한다.
 
 ## 결과와 재개
@@ -190,14 +190,19 @@ B1은 observer 대신 LSQ 계열의 학습 가능한 step size를 사용하는 L
 | Params | `params`: 보조 head를 포함한 전체 학습 파라미터. `inference_params`: 추론에서 사용하지 않는 보조 분기 제외. observer buffer 제외 |
 | Storage cost | `storage_model_state_bytes`: 실제 state 파일 크기. `storage_estimated_packed_bytes`: packed weight와 FP32 파라미터, scale/zero point의 이론 payload 크기 |
 | Token pruning ratio | `token_pruning_ratio`: LLF 복원 전 최대 patch token 제거 비율(CLS 제외). `final_token_pruning_ratio`: 마지막 block 입력 기준. Cropr off면 둘 다 0 |
-| Latency | `latency_ms_mean/median/p95`: batch 1, 장치에 올린 입력, forward만, warmup 10회 후 100회 측정. B1은 CPU INT8 커널의 `integer_latency_ms`를, RTX 4090에서는 TensorRT INT8 엔진 시간을 별도로 잰다([B1/README.md](../B1/README.md)) |
+| Latency | `latency_ms_mean/median/p95`: batch 1, 장치에 올린 입력, forward만, warmup 10회 후 100회 측정. `--device cuda` 평가에서는 TensorRT 엔진 시간도 잰다: QAT 실험은 `integer_latency_ms*`(INT8), A1은 `tensorrt_fp32_latency_ms*`(FP32) |
 
 GFLOPs와 Params는 양자화 bit 수만 줄여도 감소하지 않는다. Storage 추정에는 파일 형식/정렬/런타임 overhead가
 포함되지 않으며 실제 저장 크기로 보고하지 않는다. QAT latency의 `latency_backend=fake_quant_fp32`는
-fake quantization 비용까지 포함한다. A2/A3/A4/B2에는 정수 backend가 없으므로 `integer_latency_ms=null`이다.
-B1은 학습한 grid를 CPU INT8 커널로 실행한 `integer_latency_ms`를 `--device cpu` 평가에서 기록한다(CUDA에서는 `null`).
-GPU는 `python -m B1.benchmark_tensorrt_int8`이 학습한 grid를 유지한 INT8 Q/DQ ONNX를 TensorRT로 실행해 잰다.
-두 값 모두 INT8 커널 시간이며 2/4bit 저장·연산의 이점은 포함하지 않는다. 자세한 내용은 [B1/README.md](../B1/README.md)에 있다.
+fake quantization 비용까지 포함한 FP32 연산 시간이라 정수 실행 속도가 아니다.
+그래서 모든 실험의 평가는 `utils/tensorrt.py`의 `deployment_latency`로 TensorRT 엔진 시간을 따로 잰다(CUDA와 TensorRT가 있을 때).
+- QAT 실험(A2/A3/A4/B1/B2): `utils/int8.py`가 학습한 grid를 유지한 INT8 Q/DQ 복사본을 만든다. 8bit 코드는 128만큼 옮겨 signed INT8에 담고,
+  zero point·offset은 bias나 행/열 합 보정으로 FP32에 남긴다. 결과는 `integer_latency_ms*`다. A3는 dense·pruned 각각을 잰다.
+- A1: 같은 백엔드의 FP32 엔진 시간을 `tensorrt_fp32_latency_ms*`에 기록한다.
+- 측정할 수 없으면(CPU 평가, TensorRT 미설치, 엔진 실패) 값은 `null`이고 `*_note`에 이유가 남는다. 엔진과 레이어 보고서는 `output/tensorrt/`에 저장된다.
+- B1은 CPU에서 oneDNN INT8 커널로 `integer_latency_ms`를 잴 수도 있다(`--device cpu`).
+
+이 값들은 INT8 커널 시간이며 2/4bit 저장·연산의 이점은 포함하지 않는다. TensorRT가 실제로 INT8 커널을 골랐는지는 `*_layers_file`로 확인한다.
 실제 저비트 추론 속도/저장 비용 연구에는 별도 packed export와 지원 kernel이 필요하다.
 CUDA 측정은 전후 synchronize를 수행한다. 장치명, 라이브러리 버전, CPU thread 수도 결과에 저장한다.
 `tokens_per_block`, `tokens_after_pruning`에 실제 관측한 token 수를 저장한다.

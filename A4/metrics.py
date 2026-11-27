@@ -4,7 +4,9 @@ import timm
 import torch
 import torchvision
 from utils.results import save_results
+from utils.int8 import convert_affine_qat
 from utils.metrics import measure_vit
+from utils.tensorrt import deployment_latency
 from .quantization import storage_metrics
 from .pruning import AttentionRouter
 
@@ -22,6 +24,10 @@ def measure_model(model, args):
                    storage_estimate_note="Parameter payload and quantization metadata estimate; not an exported integer model",
                    integer_latency_ms=None)
     metrics.update(storage_metrics(model))
+    # Fake quantization runs FP32 kernels; the INT8 engine measures the same grids on integer kernels.
+    metrics.update(deployment_latency(model, device=args.device, image_size=args.image_size, warmup=args.latency_warmup,
+                                      repeats=args.latency_repeats, output=args.output,
+                                      int8_export=lambda: convert_affine_qat(model), name="int8"))
     metrics["router_params"] = sum(p.numel() for m in model.modules() if isinstance(m, AttentionRouter) for p in m.parameters())
     metrics.update(model=args.model, mode='qat', use_cropr=False, cls_pruning='train_and_inference',
                    cls_pruning_rate=args.cls_pruning_rate,

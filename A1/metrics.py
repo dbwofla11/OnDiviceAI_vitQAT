@@ -5,6 +5,7 @@ import torch
 import torchvision
 from utils.results import save_results
 from utils.metrics import measure_vit
+from utils.tensorrt import deployment_latency
 
 
 def measure_model(model, args):
@@ -20,6 +21,9 @@ def measure_model(model, args):
                    storage_estimate_note="Parameter payload and quantization metadata estimate; not an exported integer model",
                    integer_latency_ms=None)
     metrics.update(quantized_weight_params=0, latency_backend="fp32")
+    # Same deployment backend as the INT8 engines of the QAT experiments: the FP32 baseline engine.
+    metrics.update(deployment_latency(model, device=args.device, image_size=args.image_size, warmup=args.latency_warmup,
+                                      repeats=args.latency_repeats, output=args.output, name="a1_fp32"))
     metrics.update(model=args.model, mode='fp32', use_cropr=False, cls_pruning=None,
                    cls_pruning_rate=0,
                    cropr_pruning_rate=0, cropr_llf=False,

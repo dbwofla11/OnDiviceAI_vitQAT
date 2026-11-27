@@ -1,13 +1,19 @@
-"""TensorRT 10 execution/timing for fixed FP32 images/logits I/O, owned by B1.
+"""TensorRT 10 engines for fixed FP32 images/logits I/O: build, time, evaluate; shared by every experiment.
 
-The repository keeps no TensorRT code in utils (see tests/test_local_model_policy.py): backend code belongs
-to the experiment that uses it.
+deployment_latency() is what each experiment's evaluation calls: it exports the evaluated model (an INT8
+Q/DQ copy from utils.int8 for QAT experiments, the model itself for FP32), builds a TensorRT engine and
+times batch-1 forwards on the GPU, so latency does not include fake-quantization overhead.
 """
+import copy
 import json
 import math
 import statistics
+from pathlib import Path
+from types import SimpleNamespace
 
 import torch
+
+from .int8 import export_onnx
 
 
 
@@ -195,3 +201,53 @@ def compare_logits(logits, reference):
     """Classification agreement, chosen explicitly by export benchmark recipes."""
     return dict(synthetic_native_vs_reference_top1_agreement=
                 (logits.argmax(-1) == reference.argmax(-1)).float().mean().item())
+
+
+def deployment_latency(model, *, device, image_size, warmup, repeats, output, int8_export=None, sample=None,
+                       name="engine"):
+    """TensorRT batch-1 latency of the evaluated model, for metrics.json.
+
+    int8_export: callable returning the INT8 Q/DQ export copy (QAT experiments); fields are integer_latency_*.
+    Without it the model itself is timed as an FP32 engine (A1); fields are tensorrt_fp32_latency_*.
+    Fields stay None with a note when there is no CUDA GPU or TensorRT, or when the engine fails, so the
+    rest of an evaluation is never lost. Files go to output/tensorrt/.
+    """
+    prefix = "integer_latency" if int8_export is not None else "tensorrt_fp32_latency"
+    fields = {f"{prefix}_ms": None, f"{prefix}_ms_mean": None, f"{prefix}_ms_p95": None,
+              f"{prefix}_backend": None, f"{prefix}_note": None}
+    note = f"{prefix}_note"
+    if not str(device).startswith("cuda"):
+        fields[note] = "TensorRT needs a CUDA GPU: evaluate with --device cuda"
+        return fields
+    try:
+        trt = require_tensorrt(device)
+        import onnx  # noqa: F401  (export dependency)
+    except (RuntimeError, ImportError) as error:
+        fields[note] = f"TensorRT unavailable: {error}"
+        return fields
+    try:
+        net = int8_export() if int8_export is not None else copy.deepcopy(model).cpu().float().eval()
+        x = (torch.zeros(1, 3, image_size, image_size) if sample is None else sample).detach().cpu().float()
+        with torch.inference_mode():
+            reference = net(x)
+        directory = Path(output) / "tensorrt"
+        directory.mkdir(parents=True, exist_ok=True)
+        export_onnx(net, x, directory / f"{name}.onnx")
+        options = SimpleNamespace(device=device, warmup=warmup, iterations=repeats)
+        result = benchmark_engine(trt, directory, name, x, reference, options, evaluate_batches=evaluate_fixed_batch,
+                                  compare_outputs=compare_logits, allow_tf32=False, int8=int8_export is not None)
+    except Exception as error:  # Keep the evaluation; report why the engine could not be measured.
+        fields[note] = f"TensorRT measurement failed: {type(error).__name__}: {str(error).splitlines()[0]}"
+        return fields
+    fields.update({
+        f"{prefix}_ms": result["gpu_compute_ms_median"], f"{prefix}_ms_mean": result["gpu_compute_ms_mean"],
+        f"{prefix}_ms_p95": result["gpu_compute_ms_p95"],
+        f"{prefix}_backend": f"tensorrt_{trt.__version__}_{'int8' if int8_export is not None else 'fp32'}",
+        f"{prefix}_note": ("batch 1 GPU compute (CUDA events), TF32 off; INT8 Q/DQ products with the trained grids, "
+                           "FP32 softmax/norm/GELU/residual; check the layers file for the precision TensorRT chose"
+                           if int8_export is not None else "batch 1 GPU compute (CUDA events), FP32 engine, TF32 off"),
+        f"{prefix}_engine_bytes": result["storage_engine_bytes"],
+        f"{prefix}_layers_file": str(directory / f"{name}.layers.json"),
+        f"{prefix}_vs_pytorch_max_abs_logit_diff": result["synthetic_native_vs_reference_max_abs_error"],
+    })
+    return fields

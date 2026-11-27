@@ -12,7 +12,7 @@ A1과 비교하면 pruning과 양자화를 함께 적용한 영향을, B2와 비
 - activation은 기본 LSQ+(비대칭, 학습 가능한 offset)이며, `--activation-quantizer lsq`를 주면 대칭이다.
 - 어느 쪽을 고르든 학습과 추론에 같은 방식이 적용된다. 추론용으로 양자화 grid를 바꾸는 변환은 없다.
 
-**정확도는 fake-quant로, latency는 정수 커널로도 잰다.** 학습한 grid를 그대로 둔 채 CPU에서는 `integer.py`가 INT8 커널로, GPU(RTX 4090)에서는 `benchmark_tensorrt_int8.py`가 TensorRT INT8 엔진으로 실행한다. 자세한 내용은 "추론·평가" 절에 있다.
+**정확도는 fake-quant로, latency는 정수 커널로도 잰다.** 학습한 grid를 그대로 둔 채 CPU에서는 `integer.py`가 INT8 커널로, GPU(RTX 4090)에서는 다른 실험과 같은 공용 함수(`utils/int8.py`, `utils/tensorrt.py`)가 TensorRT INT8 엔진으로 실행한다. 자세한 내용은 "추론·평가" 절에 있다.
 실험 계획의 정밀도는 **W2A8**이다(`--activation-bits 8`). 저장소 기본값은 다른 실험과 같은 W2A2이므로 명령에서 지정한다.
 
 ## 폴더 구조
@@ -25,8 +25,7 @@ B1/
   quantizers.py     # LSQ / LSQ+ / StatsQ fake quantizer
   modules.py        # QuantLinear, QuantConv2d, QuantCrossAttention(Cropr scorer), prepare_linear_qat(), step 하한, 복원 검증
   integer.py        # 학습된 grid를 INT8 커널(CPU, oneDNN)로 실행하는 변환. 정수 latency 측정에 쓴다
-  tensorrt_int8.py  # 학습된 grid를 유지하는 INT8 Q/DQ ONNX export(GPU, TensorRT용)
-  tensorrt_engine.py  # TensorRT 엔진 빌드, batch 1 GPU 시간 측정, 고정 batch 정확도 평가
+  tensorrt_int8.py  # LSQ grid를 읽어 utils.int8 구성요소로 INT8 Q/DQ 복사본을 만든다(Cropr scorer 포함, TensorRT용)
   benchmark_tensorrt_int8.py  # checkpoint → ONNX → TensorRT 엔진 빌드·GPU latency·정확도 CLI
   train.py          # optimizer, loss(main + aux CE), 학습 루프, LR·증강·best 선택 정책
   inference.py      # 저장된 checkpoint의 test split 평가
@@ -164,7 +163,7 @@ python -m B1.inference --eval-checkpoint B1/runs/w2a2/best.pt --data-root data -
 - `integer_latency_ms*`는 같은 grid를 INT8 커널로 실행한 시간이다.
   - block Linear, patch embedding, head, Cropr scorer가 u8×s8 정수 행렬곱(int32 누적)을 쓴다.
   - attention 행렬곱·softmax·LayerNorm·GELU·residual은 FP32다.
-  - 커널은 CPU에만 있다. `--device cpu`로 평가하면 측정하고, CUDA에서는 `null`과 이유(`integer_latency_note`)를 적는다.
+  - `--device cpu`이면 oneDNN INT8 커널로, `--device cuda`이면 공용 TensorRT 경로로 잰다. 측정할 수 없으면 `null`과 이유(`integer_latency_note`)를 적는다.
   - 커널이 이 CPU에서 정확한 정수 결과를 내지 못하면(예: VNNI 없는 u8×s8의 int16 포화) 측정하지 않고 이유를 적는다.
 - latency는 스레드 수에 크게 좌우된다. `--threads`를 고정하고, 다른 프로그램이 적을 때 잰다.
 
@@ -174,7 +173,7 @@ python -m B1.inference --eval-checkpoint B1/runs/w2a2/best.pt --data-root data -
 
 이 명령도 test split 전체(25,250장)를 먼저 평가하므로 CPU에서는 오래 걸린다.
 
-**GPU 정수 latency(TensorRT).** RTX 4090에서는 `benchmark_tensorrt_int8.py`로 잰다. checkpoint에서 FP32(양자화를 끈 같은 가중치)와 INT8 두 ONNX를 만들고, 각각 TensorRT 엔진으로 빌드해 batch 1 GPU 연산 시간을 비교한다.
+**GPU 정수 latency(TensorRT).** RTX 4090에서는 일반 평가(`--device cuda`)가 `integer_latency_ms*`를 TensorRT INT8 엔진으로 잰다(`output/tensorrt/`에 엔진·레이어 보고서). FP32 엔진과의 비교나 엔진으로 잰 정확도까지 필요하면 `benchmark_tensorrt_int8.py`를 쓴다: checkpoint에서 FP32(양자화를 끈 같은 가중치)와 INT8 두 ONNX를 만들고, 각각 TensorRT 엔진으로 빌드해 batch 1 GPU 연산 시간을 비교한다.
 - 학습한 activation grid를 바꾸지 않는다. LSQ+ 8bit 코드 [0, 255]에서 128을 빼 zero point 0의 signed INT8로 표현하고, 남는 offset은 bias로 접는다. 예전 경로처럼 activation을 대칭 INT8로 재매핑하지 않는다.
 - weight는 학습한 코드를 INT8에 담는다(2bit packed kernel이 아니다). attention 행렬곱·softmax·LayerNorm·GELU·residual은 FP32이고 FP16·TF32는 쓰지 않는다.
 - 실행할 머신에는 NVIDIA GPU, CUDA 12 드라이버와 CUDA PyTorch가 필요하다.
@@ -242,7 +241,7 @@ python -m B1.benchmark_tensorrt_int8 --checkpoint B1/runs/w2a8/best.pt --output 
 | `quantizer_params` | step/offset 개수. `params`, `inference_params`에서 제외 |
 | `inference_storage_estimated_packed_bytes` | 추론 때 제거되는 Cropr aggregator/보조 head를 뺀 packed storage 추정 |
 | `latency_ms_mean/median/p95`, `latency_backend` | fake-quant forward 시간. `fake_quant_fp32` |
-| `integer_latency_ms`, `integer_latency_ms_mean`, `integer_latency_ms_p95` | 정수 커널(CPU) forward의 중앙값·평균·p95(ms). 측정하지 못하면 `null` |
+| `integer_latency_ms`, `integer_latency_ms_mean`, `integer_latency_ms_p95` | 정수 커널(CPU oneDNN 또는 CUDA TensorRT) forward의 중앙값·평균·p95(ms). 측정하지 못하면 `null` |
 | `integer_latency_backend`, `integer_latency_note` | 사용한 커널과 조건. 측정하지 못한 경우 그 이유 |
 | `collapsed_quantizer_channels` | step이 하한보다 훨씬 작은 weight 채널·activation quantizer 수. 정상은 0 |
 | `initialization` | `scratch` / `timm_pretrained` / `init_checkpoint` |

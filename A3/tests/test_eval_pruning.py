@@ -87,3 +87,34 @@ def test_split_mismatch_fails_before_outputs(inputs):
     with pytest.raises(ValueError, match="split"):
         run(options, model_factory=small_fixture_model)
     assert not Path(options.output).exists()
+
+
+def test_integer_latency_uses_the_shared_tensorrt_measurement(inputs, monkeypatch):
+    """Both conditions hand utils.tensorrt an INT8 copy; engine files land in the output after the documents."""
+    from pathlib import Path
+    from A3 import eval_pruning
+    from utils.int8 import int8_products
+
+    args, model, manifest, bundle, options = inputs
+    calls = []
+
+    def fake_deployment_latency(evaluated, *, device, image_size, warmup, repeats, output, int8_export=None,
+                                sample=None, name="engine"):
+        net = int8_export()
+        assert int8_products(net) > 0
+        with torch.inference_mode():
+            net(sample.cpu())  # The INT8 copy runs, including the router hooks of the pruned model.
+        layers = Path(output) / "tensorrt" / f"{name}.layers.json"
+        layers.parent.mkdir(parents=True, exist_ok=True)
+        layers.write_text("{}", encoding="utf-8")
+        calls.append(name)
+        return dict(integer_latency_ms={"dense": 4.0, "pruned": 2.0}[name], integer_latency_layers_file=str(layers))
+
+    monkeypatch.setattr(eval_pruning, "deployment_latency", fake_deployment_latency)
+    result = run(options, model_factory=small_fixture_model)
+    output = Path(options.output)
+    assert calls == ["dense", "pruned"] and result["integer_latency_speedup"] == 2.0
+    dense = json.loads((output / "dense_metrics.json").read_text())
+    assert dense["integer_latency_ms"] == 4.0
+    assert dense["integer_latency_layers_file"] == str(output / "tensorrt" / "dense.layers.json")
+    assert all((output / "tensorrt" / f"{name}.layers.json").is_file() for name in ("dense", "pruned"))

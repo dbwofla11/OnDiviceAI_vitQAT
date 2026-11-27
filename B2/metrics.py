@@ -5,6 +5,8 @@ import torch
 import torchvision
 from utils.results import save_results
 from utils.metrics import measure_vit
+from utils.tensorrt import deployment_latency
+from .int8 import convert_for_tensorrt
 from .quantization import storage_metrics
 from .cropr_adapter import Cropr, CrossAttention
 
@@ -23,6 +25,10 @@ def measure_model(model, args):
                    storage_estimate_note="Parameter payload and quantization metadata estimate; not an exported integer model",
                    integer_latency_ms=None)
     metrics.update(storage_metrics(model))
+    # Fake quantization runs FP32 kernels; the INT8 engine measures the same grids on integer kernels.
+    metrics.update(deployment_latency(model, device=args.device, image_size=args.image_size, warmup=args.latency_warmup,
+                                      repeats=args.latency_repeats, output=args.output,
+                                      int8_export=lambda: convert_for_tensorrt(model), name="int8"))
     auxiliary = 0
     for module in model.modules():
         if isinstance(module, Cropr) and hasattr(module, "head"):

@@ -4,6 +4,8 @@ import csv
 import hashlib
 import json
 import platform
+import shutil
+import tempfile
 from pathlib import Path
 
 import timm
@@ -12,6 +14,8 @@ import torchvision
 
 from utils.augment import AUGMENT_DEFAULTS
 from utils.data import loader, make_food101_data as make_data
+from utils.int8 import convert_affine_qat
+from utils.tensorrt import deployment_latency
 from .pruning import attach_pruning, PruningConfig
 from .metrics import measure_vit
 from .model import build_model, restore_model
@@ -134,10 +138,18 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
                             dataset_index=int(val_data.indices[sample_index]) if hasattr(val_data, "indices") else sample_index),
     )
     results = {}
+    engines = tempfile.TemporaryDirectory(prefix="a3_tensorrt_")
     for condition, evaluated_model in (("dense", model), ("pruned", pruned)):
         test = evaluate(evaluated_model, loader(test_data, args), args.device)
         measured = measure_vit(evaluated_model, args.image_size, args.device,
                                args.latency_warmup, args.latency_repeats, sample=sample)
+        # Fake quantization runs FP32 kernels; the INT8 engine times the same grids on integer kernels.
+        measured.update(deployment_latency(
+            evaluated_model, device=args.device, image_size=args.image_size, warmup=args.latency_warmup,
+            repeats=args.latency_repeats, output=engines.name, sample=sample, name=condition,
+            int8_export=lambda net=evaluated_model: convert_affine_qat(net)))
+        if measured.get("integer_latency_layers_file"):  # Copied to the output after the documents below.
+            measured["integer_latency_layers_file"] = str(output / "tensorrt" / f"{condition}.layers.json")
         results[condition] = dict(common, **measured, top1_acc=test["top1_acc"],
                                   test_loss=test["loss"], test_samples=test["samples"],
                                   inference_pruning=condition == "pruned")
@@ -148,9 +160,14 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
     if sha256_file(options.checkpoint) != backbone_hash:
         raise RuntimeError("An input checkpoint changed during evaluation")
     dense, reduced = results["dense"], results["pruned"]
+    if dense.get("integer_latency_ms") and reduced.get("integer_latency_ms"):
+        integer_speedup = dense["integer_latency_ms"] / reduced["integer_latency_ms"]
+    else:
+        integer_speedup = None
     comparison = dict(checkpoint_sha256=backbone_hash, split_hash=manifest["sha256"],
                       top1_loss_pp=dense["top1_acc"] - reduced["top1_acc"],
                       latency_speedup=dense["latency_ms_median"] / reduced["latency_ms_median"],
+                      integer_latency_speedup=integer_speedup,
                       gflops_ratio=reduced["gflops"] / dense["gflops"],
                       backbone_state_unchanged=True)
     # Guard against replacing inputs or outputs created while evaluation was running.
@@ -171,6 +188,11 @@ def run(options, *, model_factory=build_model, data_factory=make_data):
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+    # Engines were built in a temporary directory so the output stayed empty until the documents above.
+    built = Path(engines.name) / "tensorrt"
+    if built.exists():
+        shutil.copytree(built, output / "tensorrt")
+    engines.cleanup()
     return comparison
 
 
