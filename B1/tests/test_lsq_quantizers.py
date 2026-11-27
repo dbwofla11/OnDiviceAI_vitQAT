@@ -4,8 +4,8 @@ import math
 import pytest
 import torch
 
-from B1.quantizers import (ActivationQuantizer, LSQWeightQuantizer, StatsQWeightQuantizer,
-                           mse_asymmetric_range)
+from B1.quantizers import (EPS, MIN_STEP_FRACTION, ActivationQuantizer, LSQWeightQuantizer, StatsQWeightQuantizer,
+                           mse_asymmetric_range, positive)
 
 
 @pytest.fixture(autouse=True)
@@ -196,3 +196,78 @@ def test_quantizer_parameters_are_one_dimensional():
     assert all(p.ndim == 1 for module in modules for p in module.parameters())
     with pytest.raises(ValueError, match="bit"):
         ActivationQuantizer(5)
+
+
+@pytest.mark.parametrize("value", [1.0, 0.02, 1e-9, 0.0, -1e-9, -1e-4, -0.02, -0.2, -0.25, -0.3, -0.5, -1.0, -100.0])
+def test_positive_is_exactly_the_clamped_value_with_identity_gradient(value):
+    # x + (clamp - x) rounds to 0 for x <= -0.25, which then divides by zero in the quantizers.
+    x = torch.tensor([value], requires_grad=True)
+    out = positive(x)
+    assert out.item() == max(x.item(), torch.tensor(EPS).item()) and out.item() > 0
+    out.sum().backward()
+    assert x.grad.item() == 1.0
+
+
+@pytest.mark.parametrize("init", ["lsq", "lsq+"])
+@pytest.mark.parametrize("bits", [2, 4, 8])
+def test_step_projection_restores_only_collapsed_channels(bits, init):
+    torch.manual_seed(0)
+    weight = torch.randn(6, 400) * torch.linspace(0.005, 0.05, 6).unsqueeze(1)
+    quantizer = LSQWeightQuantizer(weight, bits, init=init)
+    healthy = quantizer.step.detach().clone()
+    quantizer.project_step(weight)  # A fresh quantizer is never below the floor.
+    assert torch.equal(quantizer.step, healthy) and quantizer.collapsed_channels(weight) == 0
+    with torch.no_grad():
+        quantizer.step[0], quantizer.step[3] = -0.5, 1e-12  # As after a too large optimizer update.
+    assert quantizer.collapsed_channels(weight) == 2
+    mean, std = weight.mean(1), weight.std(1)
+    floor = MIN_STEP_FRACTION * torch.maximum((mean - 3 * std).abs(), (mean + 3 * std).abs()) / 2 ** (bits - 1)
+    quantizer.project_step(weight)
+    assert quantizer.collapsed_channels(weight) == 0 and (quantizer.step > 0).all()
+    for channel in range(6):
+        assert torch.equal(quantizer.step[channel], floor[channel] if channel in (0, 3) else healthy[channel])
+    out = quantizer(weight)
+    assert torch.isfinite(out).all() and (out[0].abs().max() > 0).item()
+
+
+def test_statsq_has_no_step_to_project_and_activation_step_stays_positive():
+    statsq = StatsQWeightQuantizer(torch.randn(4, 10), 2)
+    statsq.project_step(torch.randn(4, 10))
+    assert statsq.collapsed_channels(torch.randn(4, 10)) == 0
+    activation = ActivationQuantizer(8)
+    activation.train()(torch.randn(100) * 1e-2)  # A small-scale layer input: the step starts near the lr.
+    assert torch.equal(activation.initial_step, activation.step)
+    before = activation.step.detach().clone()
+    activation.project_step()
+    assert torch.equal(activation.step, before) and not activation.collapsed()
+    for broken in (-0.2, 0.0, 1e-9):
+        activation.step.data.fill_(broken)
+        assert activation.collapsed()
+        activation.project_step()  # Floor relative to the initial step, which stays fixed.
+        assert activation.step.item() == pytest.approx(MIN_STEP_FRACTION * activation.initial_step.item(), rel=1e-6)
+        assert not activation.collapsed()
+        assert torch.isfinite(activation.eval()(torch.randn(100))).all()
+
+
+def test_activation_initial_step_is_saved_and_older_checkpoints_restore():
+    quantizer = ActivationQuantizer(4)
+    quantizer.train()(torch.randn(50) * 3)
+    state = quantizer.state_dict()
+    assert torch.equal(state["initial_step"], state["step"])
+    quantizer.step.data.mul_(0.5)  # Later training moves the step, not its reference.
+    assert quantizer.initial_step.item() != quantizer.step.item()
+    old_state = {key: value.clone() for key, value in quantizer.state_dict().items() if key != "initial_step"}
+    restored = ActivationQuantizer(4)
+    restored.load_state_dict(old_state)  # strict
+    assert restored.initial_step.item() == restored.step.item() == quantizer.step.item()
+    assert not restored.collapsed()
+
+
+def test_effective_step_and_integer_codes_match_the_forward_grid():
+    torch.manual_seed(1)
+    weight = torch.randn(5, 64) * 0.02
+    for bits in (2, 4, 8):
+        quantizer = LSQWeightQuantizer(weight, bits)
+        codes, step = quantizer.integer_codes(weight)
+        assert codes.dtype == torch.int8 and codes.min() >= quantizer.qmin and codes.max() <= quantizer.qmax
+        assert torch.equal(quantizer(weight).detach(), codes.float() * step.unsqueeze(1))

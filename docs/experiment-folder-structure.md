@@ -28,7 +28,9 @@ A1/A2/A4/B1/B2는 다음 구조를 사용한다.
   metrics.py       # 실험별 측정·결과 항목·환경 메타데이터·모델 파일 저장
   quantization.py  # A2/A4/B2: quantizer, QAT 연산, observer, 저장 비용
   quantizers.py    # B1: LSQ/LSQ+/StatsQ fake quantizer
-  modules.py       # B1: QuantLinear/QuantConv2d/Cropr scorer 변환과 복원 검증
+  modules.py       # B1: QuantLinear/QuantConv2d/Cropr scorer 변환, step 하한, 복원 검증
+  integer.py       # B1: 학습된 grid를 CPU INT8 커널로 실행(정수 latency)
+  tensorrt_int8.py, tensorrt_engine.py, benchmark_tensorrt_int8.py  # B1: INT8 Q/DQ ONNX export, 엔진 빌드·시간 측정, CLI
   cropr_adapter.py # B1/B2: 각 실험이 소유하는 원본 Cropr 모델 조립
   pruning/         # A4: CLS scorer·스케줄·wrapper
   tests/           # A3/A4/B1/B2: 실험별 테스트
@@ -43,7 +45,9 @@ B1의 Linear QAT(LSQ 계열)는 이들과 다른 독립 구현이다.
 
 QAT는 weight/activation 각각 2·3·4·8bit를 지원한다.
 A2/A3/B2에 있던 TensorRT export 경로는 사용하지 않아 제거했다. 이 경로는 activation을 대칭 INT8로 재매핑해 학습(비대칭)과 달랐다.
-제거한 파일은 `tensorrt_int8.py`, `benchmark_tensorrt_int8.py`, `utils/tensorrt_benchmark.py`다.
+B1에는 학습한 grid를 유지하는 TensorRT INT8 경로(`B1/tensorrt_int8.py`, `B1/benchmark_tensorrt_int8.py`)가 있다.
+TensorRT 엔진 실행기와 고정 batch 평가는 B1이 소유한다(`B1/tensorrt_engine.py`). `utils`에는 TensorRT 코드를 두지 않는다
+(`tests/test_local_model_policy.py`가 확인한다). A2/A3/B2 경로는 복원하지 않았다.
 
 ## utils에 남긴 기능
 
@@ -67,7 +71,7 @@ A2/A3/B2에 있던 TensorRT export 경로는 사용하지 않아 제거했다. �
 | `metrics.py` | torch, 표준 라이브러리 | ViT `blocks/embed_dim` 규약의 연산·토큰 수와 지연시간 측정; 정밀도/packed storage를 판단하지 않음 |
 
 `utils/models.py`, `utils/train.py`, `utils/training.py`, `utils/quantization.py`, `utils/pruning/`,
-`utils/pruning_metrics.py`, `utils/tensorrt_int8.py`, `utils/tensorrt_benchmark.py`, `utils/cropr_adapter.py`는 제거했다.
+`utils/pruning_metrics.py`, `utils/tensorrt_int8.py`, `utils/cropr_adapter.py`는 제거했다.
 utils에는 실험 선택표, QAT 클래스 import, optimizer 생성, pretrained=False 고정 정책이 없다.
 실험 구현은 utils를 사용할 수 있지만 utils는 실험을 import할 수 없다.
 `tests/support.py`와 `tests/legacy_config.py`는 이전 다중 실험 회귀 테스트의 입력 어댑터이며
@@ -197,6 +201,7 @@ Food-101 전체 학습의 성능 동등성을 보장하지 않는다.
 
 아래는 TensorRT 경로가 있던 시점의 기록이다.
 2026-11-17에 TensorRT export 코드·테스트와 `tensorrt-cu12`, `onnx`, `onnxruntime` 의존성을 제거했다.
+2026-11-26에 B1용 TensorRT 경로와 같은 의존성을 다시 추가했다(`requirements.txt`).
 
 2026-11-15 `vitqat` 가상환경에 `requirements.txt`의 누락 패키지
 `tensorrt-cu12==10.13.3.9`, `onnx==1.17.0`, `onnxruntime==1.20.1` 및 전이 의존성을 설치했다.
@@ -244,7 +249,7 @@ B1은 mode와 CLS 정책을 검증하고 strict 로드한다. 그 뒤 activation
 - 새로운 저장 형식이나 양자화 표현은 해당 실험의 `restore_model`에서 복원한다. 공통 loader에 실험 분기를 추가하지 않는다.
 - optimizer 또는 loss 변경은 해당 실험 `train.py`에서 결정한다. 학습 루프·criterion·Mixup·scheduler·gradient clipping도 해당 실험의 `train_epoch`에 있다.
 - quantizer, bit 정책, observer 동작은 해당 실험 `quantization.py`(B1은 `quantizers.py`, `modules.py`)와 `train.py`에서 변경한다.
-- 추론 전용 변환이나 backend는 해당 실험 `inference.py`에서 변경한다.
+- 추론 전용 변환이나 backend는 해당 실험 `inference.py`에서 변경한다. B1의 정수 실행은 `B1/integer.py`이고 `metrics.py`가 latency를 잰다.
   추론은 학습과 같은 양자화 방식을 유지해야 한다. 다른 grid로 바꾸는 변환(예: 대칭 INT8 export)을 추가하면
   학습 quantizer도 같은 방식으로 맞추고 `tests/test_quantization_consistency.py`를 확장한다.
 

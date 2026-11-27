@@ -8,3 +8,9 @@ huggingface_hub==0.36.2
 numpy==1.26.4
 Pillow==10.4.0
 pytest==8.3.5
+
+# Only for `python -m B1.benchmark_tensorrt_int8` on a CUDA 12 machine: INT8 export, checks and GPU latency.
+# The CUDA 12 TensorRT bindings and runtime need no SDK or trtexec.
+tensorrt-cu12==10.13.3.9
+onnx==1.17.0
+onnxruntime==1.20.1

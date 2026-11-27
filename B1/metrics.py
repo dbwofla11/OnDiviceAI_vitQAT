@@ -5,9 +5,10 @@ import timm
 import torch
 import torchvision
 from utils.results import save_results
-from utils.metrics import measure_vit
+from utils.metrics import measure_latency, measure_vit
 from .cropr_adapter import Cropr, CrossAttention
-from .modules import quantized_modules, quantizers
+from .integer import BACKEND, to_integer, unsupported_reason
+from .modules import collapsed_quantizer_channels, quantized_modules, quantizers
 from .quantizers import ActivationQuantizer
 
 
@@ -64,6 +65,31 @@ def auxiliary_parameter_ids(model):
     return ids
 
 
+def integer_latency(model, args):
+    """Latency of the same quantization grids on integer (INT8) kernels; None fields carry the reason.
+
+    The kernels are CPU only. Accuracy and the other fields still come from the fake-quant model.
+    """
+    fields = dict(integer_latency_ms=None, integer_latency_ms_mean=None, integer_latency_ms_p95=None,
+                  integer_latency_backend=None, integer_latency_note=None)
+    if not str(args.device).startswith("cpu"):
+        fields["integer_latency_note"] = "PyTorch has no CUDA INT8 kernel; evaluate with --device cpu"
+        return fields
+    reason = unsupported_reason(model)
+    if reason:
+        fields["integer_latency_note"] = reason
+        return fields
+    integer_model = to_integer(model)
+    result = measure_latency(integer_model, torch.zeros(1, 3, args.image_size, args.image_size), "cpu",
+                             args.latency_warmup, args.latency_repeats)
+    fields.update(
+        integer_latency_ms=result["median"], integer_latency_ms_mean=result["mean"],
+        integer_latency_ms_p95=result["p95"], integer_latency_backend=BACKEND,
+        integer_latency_note="CPU INT8 kernels for quantized Linear/Conv/scorer; FP32 for attention matmuls, "
+                             "softmax, norm, GELU and residual; weights of any bit width stored in INT8")
+    return fields
+
+
 def measure_model(model, args):
     metrics = measure_vit(model, args.image_size, args.device, args.latency_warmup, args.latency_repeats, pruner_types=(Cropr,),
                           scorer_flops=lambda stage, inputs: 2 * stage.num_queries * inputs[0].shape[1] * stage.embed_dim)
@@ -81,7 +107,9 @@ def measure_model(model, args):
                    token_pruning_ratio=(tokens - minimum_tokens) / patch_tokens,
                    final_token_pruning_ratio=(tokens - metrics["tokens_per_block"][-1]) / patch_tokens,
                    pruning_ratio_definition="Maximum fraction of patch tokens removed before LLF; excludes CLS",
-                   integer_latency_ms=None, latency_backend="fake_quant_fp32")
+                   latency_backend="fake_quant_fp32",
+                   collapsed_quantizer_channels=collapsed_quantizer_channels(model))
+    metrics.update(integer_latency(model, args))
     initialization = ("init_checkpoint" if getattr(args, "init_checkpoint", None)
                       else "timm_pretrained" if getattr(args, "pretrained", False) else "scratch")
     metrics.update(model=args.model, mode='linear_qat', use_cropr=args.use_cropr, cls_pruning=None,

@@ -15,7 +15,7 @@ Food-101 ViT의 양자화와 token pruning 비교 실험.
 각 실험은 `model.py`, `train.py`, `inference.py`와 자체 양자화·pruning 구현을 소유한다.
 `utils/`에는 데이터·checkpoint·계측·반복 실행 같은 공통 기반 기능만 둔다.
 모든 QAT 실험의 추론은 학습한 quantizer를 그대로 쓰므로 학습과 양자화 방식(대칭/비대칭)이 같다.
-TensorRT export 경로는 없다.
+B1은 정수 latency를 CPU(INT8 커널)와 TensorRT(RTX 4090)로 잰다([B1/README.md](B1/README.md)). 다른 실험에는 정수 실행 경로가 없다.
 [폴더 구조와 이전 경로 안내](docs/experiment-folder-structure.md),
 [공통 학습 조건·지표](docs/experiments.md).
 

@@ -12,6 +12,9 @@ A1과 비교하면 pruning과 양자화를 함께 적용한 영향을, B2와 비
 - activation은 기본 LSQ+(비대칭, 학습 가능한 offset)이며, `--activation-quantizer lsq`를 주면 대칭이다.
 - 어느 쪽을 고르든 학습과 추론에 같은 방식이 적용된다. 추론용으로 양자화 grid를 바꾸는 변환은 없다.
 
+**정확도는 fake-quant로, latency는 정수 커널로도 잰다.** 학습한 grid를 그대로 둔 채 CPU에서는 `integer.py`가 INT8 커널로, GPU(RTX 4090)에서는 `benchmark_tensorrt_int8.py`가 TensorRT INT8 엔진으로 실행한다. 자세한 내용은 "추론·평가" 절에 있다.
+실험 계획의 정밀도는 **W2A8**이다(`--activation-bits 8`). 저장소 기본값은 다른 실험과 같은 W2A2이므로 명령에서 지정한다.
+
 ## 폴더 구조
 
 ```text
@@ -20,10 +23,14 @@ B1/
   config.py         # CLI, 실험별 기본값, checkpoint 설정 검증
   model.py          # 모델 생성, scratch/--pretrained/--init-checkpoint 초기화, Linear QAT 적용, checkpoint 복원
   quantizers.py     # LSQ / LSQ+ / StatsQ fake quantizer
-  modules.py        # QuantLinear, QuantConv2d, QuantCrossAttention(Cropr scorer), prepare_linear_qat(), 복원 검증
+  modules.py        # QuantLinear, QuantConv2d, QuantCrossAttention(Cropr scorer), prepare_linear_qat(), step 하한, 복원 검증
+  integer.py        # 학습된 grid를 INT8 커널(CPU, oneDNN)로 실행하는 변환. 정수 latency 측정에 쓴다
+  tensorrt_int8.py  # 학습된 grid를 유지하는 INT8 Q/DQ ONNX export(GPU, TensorRT용)
+  tensorrt_engine.py  # TensorRT 엔진 빌드, batch 1 GPU 시간 측정, 고정 batch 정확도 평가
+  benchmark_tensorrt_int8.py  # checkpoint → ONNX → TensorRT 엔진 빌드·GPU latency·정확도 CLI
   train.py          # optimizer, loss(main + aux CE), 학습 루프, LR·증강·best 선택 정책
   inference.py      # 저장된 checkpoint의 test split 평가
-  metrics.py        # quantizer 파라미터를 제외한 params, packed storage 추정, 결과 항목·model_state.pt 저장
+  metrics.py        # quantizer 파라미터를 제외한 params, packed storage 추정, 정수 latency, 결과 항목·model_state.pt 저장
   cropr_adapter.py  # 이 실험의 timm → 원본 Cropr 모델 조립·가중치 전달
   tests/            # 수식·참조 구현 대조, 모델 변환, 파이프라인 검증
   README.md         # 이 실험의 실행 안내
@@ -75,17 +82,26 @@ OFQ와 Q-ViT의 공식 코드(`nbasyl/OFQ`, `YanjingLi0202/Q-ViT`)도 확인했�
   - `lsq`: LSQ 원 논문 초기화를 쓴다.
   - `statsq`: OFQ 방식이다(대칭 half-integer level). block 내부 저비트 Linear에만 적용하고, 8-bit layer는 `lsq+`를 쓴다.
 - Activation은 tensor별 static scale로 양자화한다. integer GEMM에서 scale을 matmul 밖으로 뺄 수 있는 형태다.
-  - 기본값 `lsq+`: `x̂ = clamp(round((x-β)/s), 0, 2^b-1)·s + β`(비대칭). β는 inference 때 bias로 접힌다(LSQ+ Eq. 5).
+  - 기본값 `lsq+`: `x̂ = clamp(round((x-β)/s), 0, 2^b-1)·s + β`(비대칭). fake-quant forward는 β를 매번 더하고, 정수 실행(`integer.py`)은 β를 bias로 접는다(LSQ+ Eq. 5).
   - `lsq`: signed `[-2^(b-1), 2^(b-1)-1]`(대칭), `s = 2<|x|>/sqrt(Qp)`.
   - 초기화: 첫 학습 batch에서 `||x̂ - x||²`를 최소화하는 clipping 범위를 고른다. 후보 범위에 LSQ+ min/max 초기화(Eq. 7)가 포함된다.
 - 학습과 추론은 같은 quantizer 모듈을 쓰므로 위 방식이 그대로 추론에도 적용된다.
 - Gradient는 다음을 따른다.
   - LSQ Eq. 3/5와 LSQ+ Eq. 3/4
   - gradient scale `g = 1/sqrt(N·Qp)`, offset에도 같은 `g`
-  - step size가 0 이하로 내려가지 않게 하는 OFQ식 clip
+  - step size를 양수로 유지하는 OFQ식 clip(`positive`)과 아래의 step 하한
 - step/offset 파라미터는 1-D다. 그래서 `utils.optim.weight_decay_groups`에서 weight decay 대상이 아니다.
 - weight step은 변환 시점의 weight로 초기화한다(`--pretrained` 또는 `--init-checkpoint`를 로드한 뒤).
-- activation step은 첫 학습 batch에서 초기화하고, `initialized` buffer로 checkpoint에 저장한다.
+- activation step은 첫 학습 batch에서 초기화하고, `initialized`·`initial_step` buffer로 checkpoint에 저장한다.
+
+**Step 하한(붕괴 방지).** AdamW는 step의 크기와 관계없이 update당 약 lr만큼 step을 움직인다.
+- 8bit weight step의 초기값은 약 4e-4다. 8bit activation step도 `attn.proj` 입력처럼 작은 값은 4e-4 정도다. lr 5e-4에서는 몇 번의 update로 0 이하가 될 수 있다.
+- `positive()`는 그 값을 1e-8로 바꾼다. 그러면 그 weight 채널이나 activation 텐서 전체가 사실상 상수가 된다.
+- 그래서 `optimizer.step()` 뒤에 `project_quantizer_steps`가 step을 하한 위로 되돌린다.
+  - weight 하한: 현재 weight의 LSQ+ 초기 step × 0.1(`MIN_STEP_FRACTION`)
+  - activation 하한: 초기화 때 정한 step(`initial_step`) × 0.1
+- 하한 위에 있는 step의 값과 gradient는 바뀌지 않는다.
+- 하한보다 훨씬 작은 step이 있는 checkpoint(이 보호 없이 학습한 결과)를 복원하면 경고하고, `metrics.json`의 `collapsed_quantizer_channels`에 개수를 적는다. `initial_step`이 없는 이전 checkpoint도 복원할 수 있다.
 
 **학습 loss.** 원본 Cropr와 같다: `main CE + aux_loss_weight·Σ aux CE`. 모든 forward가 fake quantization을 거친다. 따라서 `θ`(weight, step, offset)와 pruner `θ_p`(queries)가 양자화된 그래프에서 함께 최적화된다.
 
@@ -99,7 +115,9 @@ conda env create -f environment.yml
 conda activate vitqat
 
 # 첫 실행에서 --download로 Food-101을 data/에 받는다(약 5GB).
-# Cropr(rate 8) + Linear QAT W2A2, 첫/마지막·scorer 8-bit, scratch:
+# 실험 계획(W2A8): Cropr(rate 8) + Linear QAT, block weight 2bit·activation 8bit, 첫/마지막·scorer 8-bit, scratch:
+python -m B1.train --activation-bits 8 --data-root data --download --output B1/runs/w2a8 --device cuda
+# 저장소 기본값(W2A2):
 python -m B1.train --data-root data --download --output B1/runs/w2a2 --device cuda
 
 # 권장(문헌 방식): 학습된 FP32 모델에서 QAT fine-tuning
@@ -140,6 +158,44 @@ python -m B1.inference --eval-checkpoint B1/runs/w2a2/best.pt --data-root data -
 - bit·quantizer 종류·Cropr 설정·전처리는 checkpoint config에서 복원하므로 다시 넘기지 않는다.
 - 복원 시 activation quantizer가 초기화되지 않았거나 state에 비유한 값이 있으면 평가 전에 거부한다.
 - 이전 `cropr_linear_qat` 패키지로 저장한 checkpoint는 config에 `mode`가 없어 거부한다.
+
+**정수 latency.** 정확도와 다른 지표는 fake-quant 모델로 계산하고, latency만 두 방식으로 잰다.
+- `latency_ms_*`는 fake-quant forward 시간이다. 연산은 FP32이고 양자화 오버헤드를 포함하므로 정수 실행 속도가 아니다.
+- `integer_latency_ms*`는 같은 grid를 INT8 커널로 실행한 시간이다.
+  - block Linear, patch embedding, head, Cropr scorer가 u8×s8 정수 행렬곱(int32 누적)을 쓴다.
+  - attention 행렬곱·softmax·LayerNorm·GELU·residual은 FP32다.
+  - 커널은 CPU에만 있다. `--device cpu`로 평가하면 측정하고, CUDA에서는 `null`과 이유(`integer_latency_note`)를 적는다.
+  - 커널이 이 CPU에서 정확한 정수 결과를 내지 못하면(예: VNNI 없는 u8×s8의 int16 포화) 측정하지 않고 이유를 적는다.
+- latency는 스레드 수에 크게 좌우된다. `--threads`를 고정하고, 다른 프로그램이 적을 때 잰다.
+
+```powershell
+python -m B1.inference --eval-checkpoint B1/runs/w2a2/best.pt --data-root data --output B1/runs/eval_cpu --device cpu --threads 1 --batch-size 32
+```
+
+이 명령도 test split 전체(25,250장)를 먼저 평가하므로 CPU에서는 오래 걸린다.
+
+**GPU 정수 latency(TensorRT).** RTX 4090에서는 `benchmark_tensorrt_int8.py`로 잰다. checkpoint에서 FP32(양자화를 끈 같은 가중치)와 INT8 두 ONNX를 만들고, 각각 TensorRT 엔진으로 빌드해 batch 1 GPU 연산 시간을 비교한다.
+- 학습한 activation grid를 바꾸지 않는다. LSQ+ 8bit 코드 [0, 255]에서 128을 빼 zero point 0의 signed INT8로 표현하고, 남는 offset은 bias로 접는다. 예전 경로처럼 activation을 대칭 INT8로 재매핑하지 않는다.
+- weight는 학습한 코드를 INT8에 담는다(2bit packed kernel이 아니다). attention 행렬곱·softmax·LayerNorm·GELU·residual은 FP32이고 FP16·TF32는 쓰지 않는다.
+- 실행할 머신에는 NVIDIA GPU, CUDA 12 드라이버와 CUDA PyTorch가 필요하다.
+
+```powershell
+python -m pip install -r requirements.txt            # tensorrt-cu12, onnx, onnxruntime 포함
+python -m pytest B1/tests/test_tensorrt_int8.py -q   # GPU에서는 작은 native 엔진 테스트도 실행된다
+python -m B1.benchmark_tensorrt_int8 --checkpoint B1/runs/w2a8/best.pt --output B1/runs/tensorrt_w2a8 --device cuda:0
+# 정확도까지 같은 엔진으로 잰다(Food-101 test 전체):
+python -m B1.benchmark_tensorrt_int8 --checkpoint B1/runs/w2a8/best.pt --output B1/runs/tensorrt_w2a8_acc --device cuda:0 --data-root data --eval-batch-size 32
+```
+
+| 결과 | 의미 |
+|---|---|
+| `report.json` | 설정과 모든 측정값. `gpu_compute_ms_median/mean/p95`는 입력이 이미 GPU에 있을 때의 forward 시간(CUDA event)이며 빌드·전송·전처리는 뺀다 |
+| `gpu_compute_speedup_vs_trt_fp32` | FP32 엔진 시간 / INT8 엔진 시간(둘 다 TF32 off) |
+| `synthetic_native_vs_reference_max_abs_error` | 엔진 출력과 PyTorch export 모델 출력의 차이. 크면 latency를 쓰지 않는다 |
+| `metrics.csv` | 엔진별 정확도·latency·구조 지표를 한 줄씩 |
+| `b1_int8.layers.json` | TensorRT가 실제로 고른 레이어 정밀도. **INT8 커널이 선택됐는지는 이 파일로 직접 확인한다**(`kernel_precision_verified`는 자동으로 참이 되지 않는다) |
+
+`--export-only`는 GPU 없이 ONNX만 만든다.
 
 ## 주요 옵션
 
@@ -185,6 +241,10 @@ python -m B1.inference --eval-checkpoint B1/runs/w2a2/best.pt --data-root data -
 | `quantized_layers` | 양자화된 layer 목록 |
 | `quantizer_params` | step/offset 개수. `params`, `inference_params`에서 제외 |
 | `inference_storage_estimated_packed_bytes` | 추론 때 제거되는 Cropr aggregator/보조 head를 뺀 packed storage 추정 |
+| `latency_ms_mean/median/p95`, `latency_backend` | fake-quant forward 시간. `fake_quant_fp32` |
+| `integer_latency_ms`, `integer_latency_ms_mean`, `integer_latency_ms_p95` | 정수 커널(CPU) forward의 중앙값·평균·p95(ms). 측정하지 못하면 `null` |
+| `integer_latency_backend`, `integer_latency_note` | 사용한 커널과 조건. 측정하지 못한 경우 그 이유 |
+| `collapsed_quantizer_channels` | step이 하한보다 훨씬 작은 weight 채널·activation quantizer 수. 정상은 0 |
 | `initialization` | `scratch` / `timm_pretrained` / `init_checkpoint` |
 
 ## 4. 검증
@@ -217,11 +277,53 @@ python -m pytest B1/tests tests/test_quantization_consistency.py -q
   - 잘못된 옵션은 출력 폴더를 만들기 전에 거부되는지 확인한다.
 - 저장소 공통 테스트(`tests/test_experiment_entrypoints.py`, `tests/test_experiment_reproducibility.py` 등)도 B1의 학습·재개·추론 진입점을 실행한다.
 
+**Step 하한과 정수 실행 (2026-11-26).** CPU(i5-1340P, AVX2·AVX-VNNI), Conda `vitqat`.
+- 단위 테스트가 다음을 확인한다.
+  - 하한 위의 step은 bit 단위로 그대로다. 하한 아래는 복구되고, 이전 checkpoint는 그대로 복원된다.
+  - 정수 변환한 모든 층은 같은 층 입력에서 fake-quant와 같은 정수 코드를 낸다(W2A2/W4A8/W8A8, 대칭 activation, FP32 첫/마지막 layer, LLF, Cropr 없음).
+  - 변환한 모델은 정수 커널만 호출하고 fake quantizer를 호출하지 않는다.
+  - 커널이 틀린 값을 내면 측정하지 않는다.
+- Step 하한의 효과(합성 101-class, seed 1개. Food-101 결과가 아니다).
+  - 64px W2A2, 실제 `train_epoch`: 하한 없이는 8bit weight 채널이 304개 중 최대 17개까지 붕괴했고, 하한을 쓰면 0개다.
+  - 64px W4A8, warmup 없이 4 epoch: test top-1이 하한 없이 88.5%, 하한을 쓰면 95.8%다.
+  - 224px W4A8, warmup 없이 60 step: 하한 없이 weight 채널 426개와 activation 3개가 step ≤ 0이 됐고, 하한을 쓰면 0개다.
+  - 224px W2A8(실험 계획 설정), 같은 조건: 하한 없이 weight 채널 최대 145개와 activation 3개가 붕괴(하한의 절반 미만)했고 60 step 뒤에도 46개가 남았다. 하한을 쓰면 0개다.
+- 정수 커널.
+  - PyTorch 기본 x86/fbgemm 정수 커널은 이 CPU에서 W8A8일 때 int16 포화로 결과가 최대 50% 틀린다. oneDNN `qlinear_pointwise`는 정확하다(상대오차 1e-7). 그래서 oneDNN을 쓰고 실행 전에 정확성을 검사한다.
+  - 층 출력은 fake-quant와 1e-6 수준으로 같다. 층 사이 float 반올림이 코드 경계를 넘으면 모델 전체 logit은 달라질 수 있다(비트 단위로 같지 않다). 합성 10-class로 학습한 64px W2A2 모델 500장에서는 top-1이 모두 같았다(logit 차이 최대 0.15, logit 최대 6.6).
+- 정수 latency(224px, batch 1, 무작위 초기화+2 update 모델, warmup 5·반복 20의 중앙값을 5회 반복한 중앙값, 다른 프로그램이 실행 중인 노트북).
+
+| 설정 | 스레드 | FP32 Cropr | fake-quant(`latency_ms`) | 정수(`integer_latency_ms`) |
+|---|---|---|---|---|
+| W2A2 | 1 | 25.6 ms | 41.7 ms | 18.2 ms |
+| W2A2 | 4 | 11.9 ms | 21.1 ms | 12.5 ms |
+| W2A2 | 8 | 14.2 ms | 29.3 ms | 14.9 ms |
+| W4A8 | 1 | 27.4 ms | 42.7 ms | 18.9 ms |
+| W4A8 | 4 | 12.1 ms | 21.9 ms | 12.3 ms |
+| W4A8 | 8 | 15.1 ms | 30.1 ms | 15.0 ms |
+| W2A8 | 1 | 29.4 ms | 45.1 ms | 20.3 ms |
+| W2A8 | 4 | 13.3 ms | 23.8 ms | 12.9 ms |
+| W2A8 | 8 | 17.3 ms | 38.8 ms | 17.1 ms |
+
+  - 단일 스레드에서 정수 실행은 fake-quant보다 2.3배, FP32보다 1.4배 빠르다. 여러 스레드에서는 FP32와 비슷하다(FP32 attention 등이 남고 작은 행렬의 병렬화 이득이 작다).
+  - W2A2와 W4A8의 정수 latency는 거의 같다. 두 경우 모두 INT8에 담아 실행하기 때문이다.
+  - W2A8은 부하가 더 높은 다른 시점에 쟀으므로 다른 행과 절대값을 비교하지 않는다. 같은 시점의 FP32와 비교하면 1스레드에서 1.4배 빠르다.
+
+**TensorRT INT8 export (2026-11-26).** 이 머신에는 GPU가 없어 ONNX Runtime(CPU)까지만 실행했다.
+- 설정 11개(W2A2/W2A8/W4A8/W8A8, 대칭 activation, `lsq` weight, FP32·2bit 첫/마지막·scorer, LLF, Cropr 없음)에서 export한 모든 층의 출력이 fake-quant와 일치한다. 8bit LSQ+는 코드 하나 크기의 차이가 가끔 나고(층 출력 1e-3), 나머지는 1e-6이다.
+- W2A8 그래프는 MatMul/Conv 85개 중 양자화 대상 61개가 모두 Q/DQ 입력을 가지고, attention 24개는 FP32다.
+- ONNX Runtime으로 실행하면 PyTorch export 모델과 top-1이 같다(64px, 거의 학습하지 않은 모델, 합성 이미지 8장. logit 차이 최대 W2A2 5e-7, W2A8 9e-3, W4A8 3e-2). 최적화한 그래프에서 61개 중 60개가 정수 커널(`MatMulIntegerToFloat`)로 실행된다(첫 Conv 1개는 FP32).
+- FP32 비교용 모델도 export해 ONNX Runtime과 6e-7 이내로 같다.
+- CLI 전체 흐름은 GPU 실행기를 가짜로 바꿔 확인했다. INT8 flag는 INT8 엔진에만 준다.
+- 결함을 일부러 주입한 변이 8개 중 7개를 테스트가 잡았다. 나머지 1개(ONNX constant folding 켜기)는 이 PyTorch exporter가 Q/DQ를 유지하므로 결함이 아님을 확인했다.
+- `python -m pytest B1/tests -q` → **120 passed, 11 skipped**(onnx 미설치 환경, CUDA 없음). onnx·onnxruntime을 설치하면 ONNX 테스트도 실행된다.
+
 **이전 결과와의 동등성 (2026-11-17).**
 - 비교 대상은 이전 `cropr_linear_qat` 원본 코드다. 리팩토링 전 저장소 커밋 `bf76a21`의 `vitqat` 위에서 실행했다.
 - 두 코드를 각각 별도 프로세스에서 같은 입력·seed로 2 epoch 학습했다(64px, batch 2, accumulation 2, DropPath 0.1).
 - 다음 6개 옵션 조합을 비교했다: 기본 W2A2, `--cropr-llf`, W4A8+`statsq`+`lsq`, W3A4+`lsq`, 첫/마지막·scorer FP32, `--no-use-cropr`.
 - 모든 조합에서 다음 항목이 **정확히 일치**했다: 초기 가중치·RNG, epoch별 loss·정확도·logits, 최종 모델·optimizer·RNG 상태, 지표.
+- 이 비교는 step 하한과 `initial_step` buffer를 추가하기 전(2026-11-26 이전)의 결과다. 이후 코드는 하한에 걸리는 실행에서 결과가 달라질 수 있다.
 - 환경은 Conda `vitqat`(Python 3.10.22, PyTorch 2.3.0+cu121, torchvision 0.18.0, timm 1.0.3), CPU다.
 - `python -m pytest B1/tests -q` → **41 passed, 1 skipped**(CUDA).
 - 원래 `cropr_linear_qat` 테스트 38개(CUDA 1개 포함)는 import 경로만 바꾸거나 저장소 구조에 맞춰 이식했다.
@@ -245,7 +347,11 @@ python -m pytest B1/tests tests/test_quantization_consistency.py -q
 
 ## 5. 한계와 주의
 
-- **Fake quantization이다.** 실제 INT2 packed kernel이나 export가 아니다. latency는 `fake_quant_fp32`이고, storage는 이론 추정치다.
+- **정확도는 fake quantization으로 평가한다.** INT2 packed kernel이나 export가 아니다. `latency_ms_*`는 fake-quant 시간이고, storage는 이론 추정치다.
+- **정수 latency의 한계.**
+  - CPU(oneDNN)와 TensorRT 모두 INT8 커널로 잰다. 2/4bit로 학습한 weight도 INT8에 담으므로 더 낮은 bit의 속도·메모리 이점은 나타나지 않는다.
+  - TensorRT 엔진은 GPU가 없는 개발 머신에서 만들거나 실행하지 못했다. 커널 정밀도, 실제 속도, 정확도는 RTX 4090에서 확인해야 한다.
+  - 8bit activation은 128만큼 옮긴 코드를 쓰므로 float 반올림이 코드 경계를 넘으면 fake-quant와 logit이 조금 다를 수 있다(층 출력 기준 약 1e-3).
 - **INT2 scratch QAT는 어렵다.**
   - 문헌(LSQ, LSQ+, Q-ViT, OFQ)은 모두 학습된 FP 모델에서 시작하고, ViT에서는 KD도 쓴다.
   - 기본값은 저장소 프로토콜(scratch, 300 epochs)을 따른다.

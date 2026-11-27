@@ -7,8 +7,11 @@ Quantized (weight per output channel, input activation per tensor):
 Left in FP32: attention QK^T/AV matmuls, softmax, LayerNorm, GELU, residual adds, embeddings,
 and the training-only Cropr aggregator/auxiliary heads, which are removed at inference.
 Training and inference run the same quantizer modules, so both use the same symmetric weight grid
-and the same (asymmetric LSQ+ or symmetric LSQ) activation grid.
+and the same (asymmetric LSQ+ or symmetric LSQ) activation grid. These modules are fake quantization
+in FP32; integer.py runs the same grids with integer kernels to measure latency.
 """
+import warnings
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -110,6 +113,42 @@ def quantizers(model):
     return [m for m in model.modules() if isinstance(m, (WeightQuantizer, ActivationQuantizer))]
 
 
+def weight_quantizers(model):
+    """(weight tensor exactly as its quantizer sees it, weight quantizer) for every converted layer."""
+    found = []
+    for module in model.modules():
+        if isinstance(module, (QuantLinear, QuantConv2d)):
+            found.append((module.weight, module.weight_quant))
+        elif isinstance(module, QuantCrossAttention):
+            found.append((module.queries[0], module.query_quant))  # One step per query.
+    return found
+
+
+def project_quantizer_steps(model):
+    """Run after every optimizer update: keep each learned step inside a usable range.
+
+    With AdamW a step moves by about lr per update, whatever its size. An 8-bit weight step starts near
+    4e-4 and an 8-bit activation step can start as small, so at lr 5e-4 a few updates can push them below
+    zero and positive() would map them to EPS: the channel, or the whole activation tensor, then
+    quantizes to (almost) a constant. The floors only touch such steps; healthy steps are unchanged.
+    """
+    for weight, quantizer in weight_quantizers(model):
+        quantizer.project_step(weight)
+    for quantizer in quantizers(model):
+        if isinstance(quantizer, ActivationQuantizer):
+            quantizer.project_step()
+
+
+def collapsed_quantizer_channels(model):
+    """Weight channels and activation quantizers whose step collapsed (counts are zero after projection).
+
+    A checkpoint trained without project_quantizer_steps may contain channels that positive() clamps to
+    EPS: they quantize to (almost) zero instead of their bit width.
+    """
+    count = sum(quantizer.collapsed_channels(weight) for weight, quantizer in weight_quantizers(model))
+    return count + sum(int(q.collapsed()) for q in quantizers(model) if isinstance(q, ActivationQuantizer))
+
+
 def validate_linear_qat_state(model):
     """Reject restored states that evaluation would otherwise use with untrained ranges."""
     found = quantizers(model)
@@ -117,6 +156,10 @@ def validate_linear_qat_state(model):
         raise ValueError("Linear QAT checkpoint must contain quantizers")
     if not all(bool(q.initialized) for q in found if isinstance(q, ActivationQuantizer)):
         raise ValueError("Require activation quantizers initialized by a training batch")
-    # Step parameters may be <= 0: positive() clamps them in the forward pass.
     if any(not torch.isfinite(value).all() for value in model.state_dict().values()):
         raise ValueError("Non-finite Linear QAT checkpoint state")
+    collapsed = collapsed_quantizer_channels(model)
+    if collapsed:
+        # Older checkpoints may hold such channels: evaluate them, but say so (metrics also record the count).
+        warnings.warn(f"{collapsed} quantizer channels have a collapsed step and quantize to (almost) zero; "
+                      "retrain with the current B1 code", stacklevel=2)
